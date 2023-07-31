@@ -29,7 +29,7 @@ var _ = Describe("pgStore", func() {
 			ctx     context.Context
 			tx      *sql.Tx
 
-			record = outbox.Record{Data: []byte("data")}
+			record = outbox.Record{Message: []byte("data")}
 		)
 
 		BeforeEach(func() {
@@ -57,7 +57,7 @@ var _ = Describe("pgStore", func() {
 		})
 	})
 
-	Describe("#GetForUpdate", func() {
+	Describe("#GetWithLock", func() {
 		var (
 			subject *pgStore
 			ctx     context.Context
@@ -69,14 +69,17 @@ var _ = Describe("pgStore", func() {
 			ctx = context.Background()
 			id = xid.New()
 
-			err := insertRecord(db, outbox.Record{ID: id, Data: []byte("data")})
+			err := insertRecord(db, outbox.Record{ID: id, Message: []byte("data")})
 			Expect(err).To(Succeed())
 		})
 
 		It("should return a record on a valid id", func() {
 			subject.ProcessTx(ctx, func(s outbox.Store) bool {
-				_, err := s.GetForUpdate(ctx, id)
+				res, err := s.GetWithLock(ctx, id)
 				Expect(err).To(Succeed())
+				Expect(res.CreatedAt).ToNot(BeZero())
+				Expect(res.NumberOfAttempts).To(Equal(0))
+				Expect(res.LastAttemptAt).To(BeNil())
 
 				return true
 			})
@@ -84,7 +87,7 @@ var _ = Describe("pgStore", func() {
 
 		It("should return a `not found` error on invalid id", func() {
 			subject.ProcessTx(ctx, func(s outbox.Store) bool {
-				_, err := s.GetForUpdate(ctx, xid.New())
+				_, err := s.GetWithLock(ctx, xid.New())
 				Expect(err).To(MatchError(outbox.ErrRecordNotFound))
 
 				return true
@@ -100,7 +103,7 @@ var _ = Describe("pgStore", func() {
 			)
 
 			for _, id := range ids {
-				_ = insertRecord(db, outbox.Record{ID: id, Data: []byte("data")})
+				_ = insertRecord(db, outbox.Record{ID: id, Message: []byte("data")})
 			}
 
 			output := make(chan xid.ID, len(ids)+1)
@@ -144,7 +147,7 @@ var _ = Describe("pgStore", func() {
 				id      = xid.New()
 			)
 
-			_ = insertRecord(db, outbox.Record{ID: id, Data: []byte("data")})
+			_ = insertRecord(db, outbox.Record{ID: id, Message: []byte("data")})
 
 			err := subject.Delete(context.Background(), id)
 			Expect(err).To(Succeed())
@@ -161,7 +164,7 @@ var _ = Describe("pgStore", func() {
 				id      = xid.New()
 			)
 
-			_ = insertRecord(db, outbox.Record{ID: id, Data: []byte("data")})
+			_ = insertRecord(db, outbox.Record{ID: id, Message: []byte("data")})
 
 			var notFoundCount int32 = 0
 			deleteRecord := func() {
@@ -171,7 +174,7 @@ var _ = Describe("pgStore", func() {
 				defer cancel()
 
 				txErr := subject.ProcessTx(ctx, func(s outbox.Store) bool {
-					record, err := s.GetForUpdate(ctx, id)
+					record, err := s.GetWithLock(ctx, id)
 					if errors.Is(err, outbox.ErrRecordNotFound) {
 						atomic.AddInt32(&notFoundCount, 1)
 						return true
@@ -200,6 +203,32 @@ var _ = Describe("pgStore", func() {
 			Expect(notFoundCount).To(Equal(routineCount - 1))
 		})
 	})
+
+	Describe("#Update", func() {
+		It("should update the record successfully", func() {
+			var (
+				subject         = createStore()
+				id              = xid.New()
+				lastAttemptedAt = time.Now()
+				record          = outbox.Record{
+					ID:               id,
+					Message:          []byte("data"),
+					NumberOfAttempts: 1,
+					LastAttemptAt:    &lastAttemptedAt,
+				}
+			)
+
+			_ = insertRecord(db, record)
+
+			err := subject.Update(context.Background(), &record)
+			Expect(err).To(Succeed())
+
+			res, _ := getRecord(db, id)
+			Expect(res.NumberOfAttempts).To(Equal(1))
+			Expect(res.LastAttemptAt).ToNot(BeNil())
+			Expect(*res.LastAttemptAt).ToNot(BeTemporally("==", lastAttemptedAt))
+		})
+	})
 })
 
 func createStore() *pgStore {
@@ -209,9 +238,22 @@ func createStore() *pgStore {
 }
 
 func getRecord(db *sql.DB, id xid.ID) (*outbox.Record, error) {
-	var res outbox.Record
-	if err := db.QueryRow("SELECT id, data FROM outbox WHERE id = $1;", id.String()).
-		Scan(&res.ID, &res.Data); err != nil {
+	var (
+		res   outbox.Record
+		query = `
+		SELECT id, data, create_at, num_of_attempts, last_attempted_at
+		FROM outbox 
+		WHERE id = $1;`
+	)
+
+	if err := db.QueryRow(query, id.String()).
+		Scan(
+			&res.ID,
+			&res.Message,
+			&res.CreatedAt,
+			&res.NumberOfAttempts,
+			&res.LastAttemptAt,
+		); err != nil {
 		return nil, err
 	}
 
@@ -220,7 +262,7 @@ func getRecord(db *sql.DB, id xid.ID) (*outbox.Record, error) {
 }
 
 func insertRecord(db *sql.DB, r outbox.Record) error {
-	_, err := db.Exec("INSERT INTO outbox VALUES ($1, $2)", r.ID, r.Data)
+	_, err := db.Exec("INSERT INTO outbox (id, data) VALUES ($1, $2)", r.ID, r.Message)
 	if err != nil {
 		return err
 	}

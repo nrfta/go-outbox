@@ -60,7 +60,7 @@ func (s pgStore) CreateRecordTx(ctx context.Context, tx *sql.Tx, r outbox.Record
 	`, s.tableName)
 
 	r.ID = xid.New()
-	_, err := tx.ExecContext(ctx, query, r.ID.String(), r.Data)
+	_, err := tx.ExecContext(ctx, query, r.ID.String(), r.Message)
 	if err != nil {
 		return nil, err
 	}
@@ -135,21 +135,27 @@ func (s pgStore) getRecordIDs() ([]xid.ID, error) {
 	return res, nil
 }
 
-func (s pgStore) GetForUpdate(ctx context.Context, id xid.ID) (*outbox.Record, error) {
+func (s pgStore) GetWithLock(ctx context.Context, id xid.ID) (*outbox.Record, error) {
 	if _, ok := s.db.(*sql.Tx); !ok {
 		return nil, errors.New("get method must be called inside a transaction")
 	}
 
 	query := fmt.Sprintf(`
-	SELECT id, data
+	SELECT id, data, create_at, num_of_attempts, last_attempted_at
 	FROM %s
 	WHERE id = $1
-	FOR UPDATE;
+	FOR UPDATE SKIP LOCKED;
 	`, s.tableName)
 
 	var res outbox.Record
 	if err := s.db.QueryRowContext(ctx, query, id.String()).
-		Scan(&res.ID, &res.Data); err != nil && errors.Is(err, sql.ErrNoRows) {
+		Scan(
+			&res.ID,
+			&res.Message,
+			&res.CreatedAt,
+			&res.NumberOfAttempts,
+			&res.LastAttemptAt,
+		); err != nil && errors.Is(err, sql.ErrNoRows) {
 		return nil, outbox.ErrRecordNotFound
 	} else if err != nil {
 		return nil, err
@@ -194,11 +200,38 @@ func (s pgStore) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) erro
 	return tx.Commit()
 }
 
+func (s pgStore) Update(ctx context.Context, record *outbox.Record) error {
+	if record == nil {
+		return errors.New("record cannot be nil")
+	}
+
+	query := fmt.Sprintf(`
+	UPDATE %s
+	SET num_of_attempts = $1, last_attempted_at = $2
+	WHERE id = $3
+	`, s.tableName)
+
+	if _, err := s.db.ExecContext(
+		ctx,
+		query,
+		record.NumberOfAttempts,
+		record.LastAttemptAt,
+		record.ID,
+	); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (s pgStore) init() error {
 	query := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
 		id TEXT PRIMARY KEY,
-		data bytea
+		data bytea,
+		create_at timestamp DEFAULT NOW(),
+		num_of_attempts int DEFAULT 0,
+		last_attempted_at timestamp
 	);
 	
 	CREATE OR REPLACE FUNCTION notify_outbox_channel() 
