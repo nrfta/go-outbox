@@ -3,6 +3,7 @@ module go-outbox
 go 1.18
 
 require (
+	github.com/go-kit/log v0.2.1
 	github.com/lib/pq v1.10.9
 	github.com/neighborly/go-pghelpers v0.9.0
 	github.com/onsi/ginkgo v1.11.0
@@ -10,11 +11,11 @@ require (
 	github.com/rs/xid v1.5.0
 	github.com/twmb/franz-go v1.14.2
 	go.uber.org/mock v0.2.0
-	google.golang.org/protobuf v1.28.0
 )
 
 require (
 	github.com/DATA-DOG/go-txdb v0.1.6 // indirect
+	github.com/go-logfmt/logfmt v0.5.1 // indirect
 	github.com/go-sql-driver/mysql v1.7.1 // indirect
 	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/hpcloud/tail v1.0.0 // indirect

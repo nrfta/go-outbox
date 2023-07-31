@@ -5,8 +5,10 @@ package outbox
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -27,7 +29,9 @@ var _ = Describe("Outbox", func() {
 	var (
 		mockCtrl          = gomock.NewController(GinkgoT())
 		mockStore         = NewMockStore(mockCtrl)
-		mockMessageBroker = NewMockMessageBroker(mockCtrl)
+		mockMessageBroker = NewMockMessageBroker[*testMessage](mockCtrl)
+		mockEncodeDecoder = NewMockEncodeDecoder[*testMessage](mockCtrl)
+		mockLogger        = NewMockLogger(mockCtrl)
 	)
 
 	Describe("#SendTx", func() {
@@ -35,21 +39,21 @@ var _ = Describe("Outbox", func() {
 			var (
 				ctx  = context.Background()
 				tx   = &sql.Tx{}
-				data = testMessage{Data: "testing"}
+				data = &testMessage{Data: "testing"}
 				raw  = []byte("output")
 			)
 
-			mockMessageBroker.EXPECT().EncodeMessage(data).Return(raw, nil)
+			mockEncodeDecoder.EXPECT().Encode(data).Return(raw, nil)
 			mockStore.EXPECT().
 				CreateRecordTx(
 					gomock.AssignableToTypeOf(ctx),
 					gomock.AssignableToTypeOf(tx),
-					Record{Data: raw},
+					Record{Message: raw},
 				).Return(nil, nil)
 
-			subject := outbox{
+			subject := outbox[*testMessage]{
+				ed:    mockEncodeDecoder,
 				store: mockStore,
-				mb:    mockMessageBroker,
 			}
 
 			err := subject.SendTx(ctx, tx, data)
@@ -60,10 +64,9 @@ var _ = Describe("Outbox", func() {
 	Describe("#dispatch", func() {
 		It("should process all ids from store", func() {
 			var (
-				idChan     = make(chan xid.ID)
-				ids        = []xid.ID{xid.New(), xid.New()}
-				wg         = sync.WaitGroup{}
-				mockLogger = NewMockLogger(mockCtrl)
+				idChan = make(chan xid.ID)
+				ids    = []xid.ID{xid.New(), xid.New()}
+				wg     = sync.WaitGroup{}
 			)
 
 			wg.Add(len(ids))
@@ -75,9 +78,16 @@ var _ = Describe("Outbox", func() {
 					defer wg.Done()
 					return nil
 				})
-			mockLogger.EXPECT().Log(gomock.Any(), gomock.Any()).Times(len(ids))
+			mockLogger.EXPECT().Log(
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+			).Times(len(ids) + 1)
 
-			subject := outbox{store: mockStore, numRoutines: 5, logger: mockLogger}
+			subject := outbox[testMessage]{store: mockStore, numRoutines: 5, logger: mockLogger}
 
 			go subject.dispatch()
 			for _, i := range ids {
@@ -90,43 +100,99 @@ var _ = Describe("Outbox", func() {
 	})
 
 	Describe("#processMessageTx", func() {
-		It("should get, send, then delete message", func() {
+		It("should get, decode, send, then delete message", func() {
 			var (
-				data   = []byte("data")
-				record = &Record{ID: xid.New(), Data: data}
-
-				store = NewMockStore(mockCtrl)
+				record = &Record{ID: xid.New(), Message: []byte{}}
+				data   = &testMessage{Data: "data"}
 			)
 
-			store.EXPECT().GetForUpdate(gomock.Any(), record.ID).Return(record, nil)
+			mockStore.EXPECT().GetWithLock(gomock.Any(), record.ID).Return(record, nil)
+			mockEncodeDecoder.EXPECT().Decode(record.Message).Return(data, nil)
 			mockMessageBroker.EXPECT().Send(gomock.Any(), data).Return(nil)
-			store.EXPECT().Delete(gomock.Any(), record.ID).Return(nil)
+			mockStore.EXPECT().Delete(gomock.Any(), record.ID).Return(nil)
+			mockLogger.EXPECT().Log(
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+			)
 
-			subject := outbox{
-				store: mockStore,
-				mb:    mockMessageBroker,
+			subject := outbox[*testMessage]{
+				store:  mockStore,
+				mb:     mockMessageBroker,
+				ed:     mockEncodeDecoder,
+				logger: mockLogger,
+			}
+
+			success := subject.processMessageTx(context.Background(), record.ID)(mockStore)
+			Expect(success).To(BeTrue())
+		})
+
+		It("should skip the record if not found", func() {
+			var (
+				record = &Record{ID: xid.New(), Message: []byte("data")}
+
+				store             = NewMockStore(mockCtrl)
+				mockMessageBroker = NewMockMessageBroker[testMessage](mockCtrl)
+			)
+
+			store.EXPECT().GetWithLock(gomock.Any(), record.ID).Return(nil, ErrRecordNotFound)
+			mockLogger.EXPECT().Log(
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+			)
+
+			subject := outbox[testMessage]{
+				store:  mockStore,
+				mb:     mockMessageBroker,
+				logger: mockLogger,
 			}
 
 			success := subject.processMessageTx(context.Background(), record.ID)(store)
 			Expect(success).To(BeTrue())
 		})
 
-		It("should skip the record if not found", func() {
+		It("should send to dead letter queue if max retries are hit", func() {
 			var (
-				record = &Record{ID: xid.New(), Data: []byte("data")}
+				record = &Record{ID: xid.New(), Message: []byte{}, CreatedAt: time.Now(), NumberOfAttempts: 4}
+				data   = &testMessage{Data: "data"}
+				err    = errors.New("send error")
 
-				store             = NewMockStore(mockCtrl)
-				mockMessageBroker = NewMockMessageBroker(mockCtrl)
+				mockDLQ = NewMockDeadLetterQueue(mockCtrl)
 			)
 
-			store.EXPECT().GetForUpdate(gomock.Any(), record.ID).Return(nil, ErrRecordNotFound)
+			mockStore.EXPECT().GetWithLock(gomock.Any(), record.ID).Return(record, nil)
+			mockEncodeDecoder.EXPECT().Decode(record.Message).Return(data, nil)
+			mockMessageBroker.EXPECT().Send(gomock.Any(), data).Return(err)
+			mockLogger.EXPECT().Log(
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+			)
+			mockStore.EXPECT().Update(gomock.Any(), record).Return(nil)
+			mockDLQ.EXPECT().Send(gomock.Any(), data, err)
+			mockStore.EXPECT().Delete(gomock.Any(), record.ID).Return(nil)
 
-			subject := outbox{
-				store: mockStore,
-				mb:    mockMessageBroker,
+			subject := outbox[*testMessage]{
+				store:  mockStore,
+				mb:     mockMessageBroker,
+				ed:     mockEncodeDecoder,
+				logger: mockLogger,
+				dlq:    mockDLQ,
 			}
 
-			success := subject.processMessageTx(context.Background(), record.ID)(store)
+			success := subject.processMessageTx(context.Background(), record.ID)(mockStore)
 			Expect(success).To(BeTrue())
 		})
 	})
