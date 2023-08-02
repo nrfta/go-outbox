@@ -4,10 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"go-outbox"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/nrfta/go-outbox"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"

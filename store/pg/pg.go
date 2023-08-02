@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"go-outbox"
+	"github.com/nrfta/go-outbox"
 
 	"github.com/lib/pq"
 	"github.com/rs/xid"
@@ -20,7 +20,7 @@ type execQuerier interface {
 }
 
 type Logger interface {
-	Log(...any)
+	Log(...any) error
 }
 
 type pgStore struct {
@@ -92,7 +92,7 @@ func (s pgStore) Listen() <-chan xid.ID {
 			select {
 			case <-l.Notify:
 				// New record(s) available to process
-			case <-time.After(300 * time.Second):
+			case <-time.After(90 * time.Second):
 				go l.Ping()
 				// Check if there's more work available, just in case it takes a while
 				// for the Listener to notice connection loss and reconnect.

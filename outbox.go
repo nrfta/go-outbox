@@ -224,8 +224,7 @@ func (o outbox[T]) processMessageTx(ctx context.Context, id xid.ID) func(s Store
 			return false
 		}
 
-		err = o.mb.Send(ctx, msg)
-		if err != nil {
+		if err = o.mb.Send(ctx, msg); err != nil {
 			attemptedAt := time.Now()
 			record.LastAttemptAt = &attemptedAt
 			record.NumberOfAttempts++

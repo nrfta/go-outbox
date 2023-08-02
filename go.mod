@@ -1,4 +1,4 @@
-module go-outbox
+module github.com/nrfta/go-outbox
 
 go 1.18
 

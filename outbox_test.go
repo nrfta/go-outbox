@@ -1,6 +1,6 @@
 package outbox
 
-//go:generate go run go.uber.org/mock/mockgen --source=outbox.go --destination=mock_outbox_test.go -package=outbox -self_package=go-outbox Store,Logger,MessageBroker
+//go:generate go run go.uber.org/mock/mockgen --source=outbox.go --destination=mock_outbox_test.go -package=outbox -self_package=github.com/nrfta/go-outbox Store,Logger,MessageBroker
 
 import (
 	"context"
