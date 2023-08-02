@@ -42,6 +42,9 @@ jobs:
         with:
           go-version: ${{matrix.go-version}}
 
+      - name: Install Dependencies
+        run: make prepare
+
       - name: Tests
         run: go test -v ./...
         env:
