@@ -1,3 +1,3 @@
 # Outbox
 
-This package implements the oubox pattern for message queues.
+This package implements the outbox pattern for message queues.
