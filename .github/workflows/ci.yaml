@@ -43,7 +43,13 @@ jobs:
           go-version: ${{matrix.go-version}}
 
       - name: Install Dependencies
-        run: make prepare
+        run: |
+          go env -w GOPRIVATE=github.com/nrfta
+          go mod download
+
+      - name: Run Go Generate
+        run: |
+          go generate ./...
 
       - name: Tests
         run: go test -v ./...
