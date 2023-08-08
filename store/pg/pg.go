@@ -247,26 +247,26 @@ func (s pgStore) init() error {
 			create_at timestamp DEFAULT NOW(),
 			num_of_attempts int DEFAULT 0,
 			last_attempted_at timestamp
-			);
+		);
 			
-			CREATE OR REPLACE FUNCTION %s() 
+		CREATE OR REPLACE FUNCTION %s() 
 			RETURNS TRIGGER 
 			LANGUAGE PLPGSQL
-			AS $$
-			BEGIN
+		AS $$
+		BEGIN
 			NOTIFY %s;
 			RETURN NULL;
-			END;
-			$$
-			;
+		END;
+		$$
+		;
 			
-			DROP TRIGGER IF EXISTS %s ON %s;
+		DROP TRIGGER IF EXISTS %s ON %s;
 			
-			CREATE TRIGGER %s AFTER INSERT
+		CREATE TRIGGER %s AFTER INSERT
 			ON %s
 			FOR EACH ROW
 			EXECUTE PROCEDURE %s();
-			`,
+		`,
 			s.tableName,
 			fnName,
 			s.chanName,
