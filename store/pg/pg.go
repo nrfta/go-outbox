@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/go-kit/log"
 	"github.com/nrfta/go-outbox"
 
 	"github.com/lib/pq"
@@ -19,14 +21,13 @@ type execQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-type Logger interface {
-	Log(...any) error
-}
+type Logger log.Logger
 
 type pgStore struct {
 	db        execQuerier
 	tableName string
 	connStr   string
+	chanName  string
 	logger    Logger
 }
 
@@ -41,11 +42,13 @@ func WithTableName(tn string) option {
 var _ outbox.Store = &pgStore{}
 
 func NewStore(db execQuerier, connStr string, logger Logger, opts ...option) (*pgStore, error) {
-	s := &pgStore{db, "outbox", connStr, logger}
+	s := &pgStore{db, "outbox", connStr, "", logger}
 
 	for _, o := range opts {
 		o(s)
 	}
+
+	s.chanName = strings.ReplaceAll(fmt.Sprintf("%s_channel", s.tableName), ".", "_")
 
 	if err := s.init(); err != nil {
 		return nil, err
@@ -60,8 +63,7 @@ func (s pgStore) CreateRecordTx(ctx context.Context, tx *sql.Tx, r outbox.Record
 	`, s.tableName)
 
 	r.ID = xid.New()
-	_, err := tx.ExecContext(ctx, query, r.ID.String(), r.Message)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, query, r.ID.String(), r.Message); err != nil {
 		return nil, err
 	}
 
@@ -69,19 +71,29 @@ func (s pgStore) CreateRecordTx(ctx context.Context, tx *sql.Tx, r outbox.Record
 }
 
 func (s pgStore) Listen() <-chan xid.ID {
-	listener := pq.NewListener(
-		s.connStr,
-		15*time.Second,
-		2*time.Minute,
-		func(event pq.ListenerEventType, err error) {},
+	var (
+		logger   = log.With(s.logger, "component", "pgStore", "method", "Listen")
+		listener = pq.NewListener(
+			s.connStr,
+			15*time.Second,
+			2*time.Minute,
+			func(event pq.ListenerEventType, err error) {},
+		)
 	)
+
+	if err := listener.Listen(s.chanName); err != nil {
+		logger.Log("err", fmt.Errorf("unable to listen to channel %s: %v", s.chanName, err))
+		return nil
+	}
+
+	logger.Log("msg", fmt.Sprintf("listening on channel %s", s.chanName))
 
 	idChan := make(chan xid.ID, 1)
 	go func(l *pq.Listener) {
 		for {
 			ids, err := s.getRecordIDs()
 			if err != nil {
-				s.logger.Log("component", "pgStore", "method", "Listen", "err", err)
+				s.logger.Log("err", err)
 				continue
 			}
 
@@ -225,33 +237,46 @@ func (s pgStore) Update(ctx context.Context, record *outbox.Record) error {
 }
 
 func (s pgStore) init() error {
-	query := fmt.Sprintf(`
-	CREATE TABLE IF NOT EXISTS %s (
-		id TEXT PRIMARY KEY,
-		data bytea,
-		create_at timestamp DEFAULT NOW(),
-		num_of_attempts int DEFAULT 0,
-		last_attempted_at timestamp
-	);
-	
-	CREATE OR REPLACE FUNCTION notify_outbox_channel() 
-		RETURNS TRIGGER 
-		LANGUAGE PLPGSQL
-	AS $$
-	BEGIN
-		NOTIFY outbox;
-		RETURN NULL;
-	END;
-	$$
-	;
-	
-	DROP TRIGGER IF EXISTS outbox_insert_notification ON %s;
-	
-	CREATE TRIGGER outbox_insert_notification AFTER INSERT
-		ON %s
-		FOR EACH ROW
-		EXECUTE PROCEDURE notify_outbox_channel();
-	`, s.tableName, s.tableName, s.tableName)
+	var (
+		fnName      = strings.ReplaceAll(fmt.Sprintf("notify_%s_channel", s.tableName), ".", "_")
+		triggerName = strings.ReplaceAll(fmt.Sprintf("%s_insert_notification", s.tableName), ".", "_")
+		query       = fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id TEXT PRIMARY KEY,
+			data bytea,
+			create_at timestamp DEFAULT NOW(),
+			num_of_attempts int DEFAULT 0,
+			last_attempted_at timestamp
+			);
+			
+			CREATE OR REPLACE FUNCTION %s() 
+			RETURNS TRIGGER 
+			LANGUAGE PLPGSQL
+			AS $$
+			BEGIN
+			NOTIFY %s;
+			RETURN NULL;
+			END;
+			$$
+			;
+			
+			DROP TRIGGER IF EXISTS %s ON %s;
+			
+			CREATE TRIGGER %s AFTER INSERT
+			ON %s
+			FOR EACH ROW
+			EXECUTE PROCEDURE %s();
+			`,
+			s.tableName,
+			fnName,
+			s.chanName,
+			triggerName,
+			s.tableName,
+			triggerName,
+			s.tableName,
+			fnName,
+		)
+	)
 
 	_, err := s.db.ExecContext(context.Background(), query)
 	if err != nil {
