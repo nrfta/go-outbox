@@ -1,5 +1,7 @@
 package pg
 
+//go:generate go run go.uber.org/mock/mockgen --destination=mock_pg_test.go -package=pg -self_package=github.com/nrfta/go-outbox/store/pg . Logger
+
 import (
 	"context"
 	"database/sql"
@@ -36,6 +38,12 @@ type option func(s *pgStore)
 func WithTableName(tn string) option {
 	return func(s *pgStore) {
 		s.tableName = tn
+	}
+}
+
+func WithLogger(l Logger) option {
+	return func(s *pgStore) {
+		s.logger = l
 	}
 }
 

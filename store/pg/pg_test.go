@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nrfta/go-outbox"
+	gomock "go.uber.org/mock/gomock"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -16,6 +17,16 @@ import (
 )
 
 var _ = Describe("pgStore", func() {
+	var (
+		mockCtrl   *gomock.Controller
+		mockLogger *MockLogger
+	)
+
+	BeforeEach(func() {
+		mockCtrl = gomock.NewController(GinkgoT())
+		mockLogger = NewMockLogger(mockCtrl)
+	})
+
 	Describe("NewStore", func() {
 		It("should successfully create pgStore", func() {
 			subject, err := NewStore(db, connStr, nil)
@@ -97,9 +108,20 @@ var _ = Describe("pgStore", func() {
 	})
 
 	Describe("#Listen", func() {
+		BeforeEach(func() {
+			mockLogger.EXPECT().Log(
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+			)
+		})
+
 		It("should pull all new records on start", func() {
 			var (
-				subject = createStore()
+				subject = createStore(WithLogger(mockLogger))
 				ids     = []xid.ID{xid.New(), xid.New(), xid.New()}
 			)
 
@@ -127,7 +149,7 @@ var _ = Describe("pgStore", func() {
 
 		It("should send a new id to the returned channel when a new record is created", func() {
 			var (
-				subject = createStore()
+				subject = createStore(WithLogger(mockLogger))
 				idChan  = subject.Listen()
 				ctx     = context.Background()
 				tx, _   = db.BeginTx(ctx, nil)
@@ -232,8 +254,8 @@ var _ = Describe("pgStore", func() {
 	})
 })
 
-func createStore() *pgStore {
-	s, err := NewStore(db, connStr, nil)
+func createStore(opts ...option) *pgStore {
+	s, err := NewStore(db, connStr, nil, opts...)
 	Expect(err).To(Succeed())
 	return s
 }

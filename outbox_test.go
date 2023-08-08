@@ -27,12 +27,20 @@ func TestOutboxSuite(t *testing.T) {
 
 var _ = Describe("Outbox", func() {
 	var (
-		mockCtrl          = gomock.NewController(GinkgoT())
-		mockStore         = NewMockStore(mockCtrl)
+		mockCtrl          *gomock.Controller
+		mockStore         *MockStore
+		mockMessageBroker *MockMessageBroker[*testMessage]
+		mockEncodeDecoder *MockEncodeDecoder[*testMessage]
+		mockLogger        *MockLogger
+	)
+
+	BeforeEach(func() {
+		mockCtrl = gomock.NewController(GinkgoT())
+		mockStore = NewMockStore(mockCtrl)
 		mockMessageBroker = NewMockMessageBroker[*testMessage](mockCtrl)
 		mockEncodeDecoder = NewMockEncodeDecoder[*testMessage](mockCtrl)
-		mockLogger        = NewMockLogger(mockCtrl)
-	)
+		mockLogger = NewMockLogger(mockCtrl)
+	})
 
 	Describe("#SendTx", func() {
 		It("should encode and save message", func() {
@@ -92,8 +100,6 @@ var _ = Describe("Outbox", func() {
 				gomock.Any(),
 				gomock.Any(),
 				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
 			).Times(len(ids) + 1)
 
 			subject := outbox[testMessage]{store: mockStore, numRoutines: 5, logger: mockLogger}
@@ -120,10 +126,6 @@ var _ = Describe("Outbox", func() {
 			mockMessageBroker.EXPECT().Send(gomock.Any(), data).Return(nil)
 			mockStore.EXPECT().Delete(gomock.Any(), record.ID).Return(nil)
 			mockLogger.EXPECT().Log(
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
 				gomock.Any(),
 				gomock.Any(),
 				gomock.Any(),
@@ -155,8 +157,6 @@ var _ = Describe("Outbox", func() {
 				gomock.Any(),
 				gomock.Any(),
 				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
 			)
 
 			subject := outbox[testMessage]{
@@ -184,6 +184,10 @@ var _ = Describe("Outbox", func() {
 			mockLogger.EXPECT().Log(
 				gomock.Any(),
 				gomock.Any(),
+				gomock.Any(),
+				gomock.Any(),
+			)
+			mockLogger.EXPECT().Log(
 				gomock.Any(),
 				gomock.Any(),
 				gomock.Any(),
