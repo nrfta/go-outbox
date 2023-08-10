@@ -1,0 +1,20 @@
+name: "Change Management"
+
+# **What it does**: Adds a link to PRs with a newly created Asana task.
+# **Why we have it**: To create a record of all code changes.
+# **Who does it impact**: Everyone
+
+on:
+  pull_request:
+    types: [opened, edited, closed, reopened]
+
+jobs:
+  change-management:
+    runs-on: ubuntu-latest
+    if: ${{ github.actor != 'dependabot[bot]' }}
+    name: Change Management
+    steps:
+      - uses: nrfta/action-change-management@v1
+    env:
+      ASANA_API_TOKEN: "${{ secrets.ASANA_API_TOKEN }}"
+      GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
