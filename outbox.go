@@ -1,5 +1,7 @@
 package outbox
 
+//go:generate go run go.uber.org/mock/mockgen -destination mock_logger_test.go -package outbox github.com/go-kit/log Logger
+
 import (
 	"bytes"
 	"context"
@@ -19,10 +21,6 @@ var (
 	errInvalidType    = errors.New("invalid message type")
 	ErrRecordNotFound = errors.New("record not found")
 )
-
-type Logger interface {
-	log.Logger
-}
 
 type MessageBroker[T any] interface {
 	Send(context.Context, T) error
@@ -79,7 +77,7 @@ type outbox[T any] struct {
 	dlq   DeadLetterQueue
 	ed    EncodeDecoder[T]
 
-	logger Logger
+	logger log.Logger
 
 	numRoutines int
 	maxRetries  int
@@ -99,7 +97,7 @@ func WithMaxRetries[T any](n int) option[T] {
 	}
 }
 
-func WithLogger[T any](logger Logger) option[T] {
+func WithLogger[T any](logger log.Logger) option[T] {
 	return func(o *outbox[T]) {
 		o.logger = logger
 	}
@@ -163,7 +161,7 @@ func (o outbox[T]) dispatch() {
 }
 
 func (o outbox[T]) process(id xid.ID) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := o.store.ProcessTx(ctx, o.processMessageTx(ctx, id)); err != nil {
@@ -177,10 +175,11 @@ func (o outbox[T]) processMessageTx(ctx context.Context, id xid.ID) func(s Store
 			err    error
 			msg    T
 			record *Record
-			logger = log.With(o.logger, "record", record, "brokerMessage", msg)
 		)
 
 		defer func() {
+			logger := log.With(o.logger, "recordId", id)
+
 			if success {
 				logger.Log("msg", "successfully processed message")
 				return
@@ -194,7 +193,7 @@ func (o outbox[T]) processMessageTx(ctx context.Context, id xid.ID) func(s Store
 			success = true
 
 			if err := s.Update(ctx, record); err != nil {
-				o.logger.Log("err", fmt.Errorf("unable to update record: %v", err), "record", record)
+				logger.Log("err", fmt.Errorf("unable to update record: %v", err))
 				return
 			}
 
@@ -202,7 +201,7 @@ func (o outbox[T]) processMessageTx(ctx context.Context, id xid.ID) func(s Store
 				return
 			}
 
-			logger.Log("msg", "max retries hit, sending to DLQ", "err", err)
+			logger.Log("msg", "max retries hit, sending to DLQ")
 			if err := o.dlq.Send(ctx, msg, err); err != nil {
 				logger.Log("err", fmt.Errorf("unable to send record to DLQ: %v", err))
 				return
@@ -229,7 +228,10 @@ func (o outbox[T]) processMessageTx(ctx context.Context, id xid.ID) func(s Store
 			return false
 		}
 
-		if err = o.mb.Send(ctx, msg); err != nil {
+		mbCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
+		if err = o.mb.Send(mbCtx, msg); err != nil {
 			attemptedAt := time.Now()
 			record.LastAttemptAt = &attemptedAt
 			record.NumberOfAttempts++
