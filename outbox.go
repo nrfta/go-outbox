@@ -1,5 +1,7 @@
 package outbox
 
+//go:generate go run go.uber.org/mock/mockgen -destination mock_logger_test.go -package outbox github.com/go-kit/log Logger
+
 import (
 	"bytes"
 	"context"
@@ -19,8 +21,6 @@ var (
 	errInvalidType    = errors.New("invalid message type")
 	ErrRecordNotFound = errors.New("record not found")
 )
-
-type Logger log.Logger
 
 type MessageBroker[T any] interface {
 	Send(context.Context, T) error
@@ -77,7 +77,7 @@ type outbox[T any] struct {
 	dlq   DeadLetterQueue
 	ed    EncodeDecoder[T]
 
-	logger Logger
+	logger log.Logger
 
 	numRoutines int
 	maxRetries  int
@@ -97,7 +97,7 @@ func WithMaxRetries[T any](n int) option[T] {
 	}
 }
 
-func WithLogger[T any](logger Logger) option[T] {
+func WithLogger[T any](logger log.Logger) option[T] {
 	return func(o *outbox[T]) {
 		o.logger = logger
 	}
