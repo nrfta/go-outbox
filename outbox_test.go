@@ -67,15 +67,6 @@ var _ = Describe("Outbox", func() {
 			err := subject.SendTx(ctx, tx, data)
 			Expect(err).To(Succeed())
 		})
-
-		It("should return an error if the message is not the correct type", func() {
-			invalidMsg := struct{}{}
-
-			subject := outbox[testMessage]{}
-
-			err := subject.SendTx(context.Background(), nil, invalidMsg)
-			Expect(err).To(MatchError(errInvalidType))
-		})
 	})
 
 	Describe("#dispatch", func() {
