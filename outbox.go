@@ -66,9 +66,9 @@ type EncodeDecoder[T any] interface {
 }
 
 // Outbox implements the outbox pattern.
-type Outbox interface {
+type Outbox[T any] interface {
 	// SendTx stores the provided message within the provided Tx
-	SendTx(ctx context.Context, tx *sql.Tx, msg any) error
+	SendTx(ctx context.Context, tx *sql.Tx, msg T) error
 }
 
 type outbox[T any] struct {
@@ -103,7 +103,7 @@ func WithLogger[T any](logger log.Logger) option[T] {
 	}
 }
 
-func New[T any](s Store, mb MessageBroker[T], dlq DeadLetterQueue, opts ...option[T]) Outbox {
+func New[T any](s Store, mb MessageBroker[T], dlq DeadLetterQueue, opts ...option[T]) Outbox[T] {
 	logger := log.NewJSONLogger(log.NewSyncWriter(os.Stderr))
 
 	ob := &outbox[T]{
@@ -131,13 +131,8 @@ func New[T any](s Store, mb MessageBroker[T], dlq DeadLetterQueue, opts ...optio
 	return ob
 }
 
-func (o outbox[T]) SendTx(ctx context.Context, tx *sql.Tx, msg any) error {
-	want, ok := msg.(T)
-	if !ok {
-		return fmt.Errorf("%w: wanted %T, got %T", errInvalidType, want, msg)
-	}
-
-	raw, err := o.ed.Encode(want)
+func (o outbox[T]) SendTx(ctx context.Context, tx *sql.Tx, msg T) error {
+	raw, err := o.ed.Encode(msg)
 	if err != nil {
 		return fmt.Errorf("unable to encode message: %v", err)
 	}
