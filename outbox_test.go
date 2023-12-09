@@ -3,9 +3,12 @@ package outbox
 //go:generate go run go.uber.org/mock/mockgen -destination mock_outbox_test.go -package outbox -source outbox.go Store,MessageBroker,EncodeDecoder
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -31,7 +34,9 @@ var _ = Describe("Outbox", func() {
 		mockStore         *MockStore
 		mockMessageBroker *MockMessageBroker[*testMessage]
 		mockEncodeDecoder *MockEncodeDecoder[*testMessage]
-		mockLogger        *MockLogger
+
+		buf    = &bytes.Buffer{}
+		logger *slog.Logger
 	)
 
 	BeforeEach(func() {
@@ -39,7 +44,8 @@ var _ = Describe("Outbox", func() {
 		mockStore = NewMockStore(mockCtrl)
 		mockMessageBroker = NewMockMessageBroker[*testMessage](mockCtrl)
 		mockEncodeDecoder = NewMockEncodeDecoder[*testMessage](mockCtrl)
-		mockLogger = NewMockLogger(mockCtrl)
+
+		logger = slog.New(slog.NewJSONHandler(buf, nil))
 	})
 
 	Describe("#SendTx", func() {
@@ -86,14 +92,8 @@ var _ = Describe("Outbox", func() {
 					defer wg.Done()
 					return nil
 				})
-			mockLogger.EXPECT().Log(
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
-			).Times(len(ids) + 1)
 
-			subject := outbox[testMessage]{store: mockStore, numRoutines: 5, logger: mockLogger}
+			subject := outbox[testMessage]{store: mockStore, numRoutines: 5, logger: logger}
 
 			go subject.dispatch()
 			for _, i := range ids {
@@ -116,18 +116,12 @@ var _ = Describe("Outbox", func() {
 			mockEncodeDecoder.EXPECT().Decode(record.Message).Return(data, nil)
 			mockMessageBroker.EXPECT().Send(gomock.Any(), data).Return(nil)
 			mockStore.EXPECT().Delete(gomock.Any(), record.ID).Return(nil)
-			mockLogger.EXPECT().Log(
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
-			)
 
 			subject := outbox[*testMessage]{
 				store:  mockStore,
 				mb:     mockMessageBroker,
 				ed:     mockEncodeDecoder,
-				logger: mockLogger,
+				logger: logger,
 			}
 
 			success := subject.processMessageTx(context.Background(), record.ID)(mockStore)
@@ -143,17 +137,11 @@ var _ = Describe("Outbox", func() {
 			)
 
 			store.EXPECT().GetWithLock(gomock.Any(), record.ID).Return(nil, ErrRecordNotFound)
-			mockLogger.EXPECT().Log(
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
-			)
 
 			subject := outbox[testMessage]{
 				store:  mockStore,
 				mb:     mockMessageBroker,
-				logger: mockLogger,
+				logger: logger,
 			}
 
 			success := subject.processMessageTx(context.Background(), record.ID)(store)
@@ -172,32 +160,20 @@ var _ = Describe("Outbox", func() {
 			mockStore.EXPECT().GetWithLock(gomock.Any(), record.ID).Return(record, nil)
 			mockEncodeDecoder.EXPECT().Decode(record.Message).Return(data, nil)
 			mockMessageBroker.EXPECT().Send(gomock.Any(), data).Return(err)
-			mockLogger.EXPECT().Log(
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
-			)
-			mockLogger.EXPECT().Log(
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
-				gomock.Any(),
-			)
 			mockStore.EXPECT().Update(gomock.Any(), record).Return(nil)
-			mockDLQ.EXPECT().Send(gomock.Any(), data, err)
+			mockDLQ.EXPECT().Send(gomock.Any(), data, fmt.Errorf("message bus send: %v", err))
 			mockStore.EXPECT().Delete(gomock.Any(), record.ID).Return(nil)
 
 			subject := outbox[*testMessage]{
 				store:  mockStore,
 				mb:     mockMessageBroker,
 				ed:     mockEncodeDecoder,
-				logger: mockLogger,
+				logger: logger,
 				dlq:    mockDLQ,
 			}
 
 			success := subject.processMessageTx(context.Background(), record.ID)(mockStore)
-			Expect(success).To(BeTrue())
+			Expect(success).To(BeFalse())
 		})
 	})
 })
