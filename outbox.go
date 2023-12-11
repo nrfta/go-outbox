@@ -1,7 +1,5 @@
 package outbox
 
-//go:generate go run go.uber.org/mock/mockgen -destination mock_logger_test.go -package outbox github.com/go-kit/log Logger
-
 import (
 	"bytes"
 	"context"
@@ -9,6 +7,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"reflect"
 	"time"
@@ -20,6 +19,7 @@ import (
 var (
 	errInvalidType    = errors.New("invalid message type")
 	ErrRecordNotFound = errors.New("record not found")
+	errSkippingRecord = errors.New("skipping record")
 )
 
 type MessageBroker[T any] interface {
@@ -77,7 +77,7 @@ type outbox[T any] struct {
 	dlq   DeadLetterQueue
 	ed    EncodeDecoder[T]
 
-	logger log.Logger
+	logger *slog.Logger
 
 	numRoutines int
 	maxRetries  int
@@ -99,12 +99,22 @@ func WithMaxRetries[T any](n int) option[T] {
 
 func WithLogger[T any](logger log.Logger) option[T] {
 	return func(o *outbox[T]) {
+		o.logger = slog.Default()
+	}
+}
+
+func WithSlogLogger[T any](logger *slog.Logger) option[T] {
+	return func(o *outbox[T]) {
+		if logger == nil {
+			logger = slog.Default()
+		}
+
 		o.logger = logger
 	}
 }
 
 func New[T any](s Store, mb MessageBroker[T], dlq DeadLetterQueue, opts ...option[T]) Outbox[T] {
-	logger := log.NewJSONLogger(log.NewSyncWriter(os.Stderr))
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
 	ob := &outbox[T]{
 		store:       s,
@@ -120,10 +130,9 @@ func New[T any](s Store, mb MessageBroker[T], dlq DeadLetterQueue, opts ...optio
 		o(ob)
 	}
 
-	ob.logger = log.With(
-		ob.logger,
-		"component", "outbox",
-		"messageBroker", reflect.TypeOf(mb),
+	ob.logger = ob.logger.With(
+		slog.String("component", "outbox"),
+		slog.String("messageBroker", reflect.TypeOf(mb).String()),
 	)
 
 	go ob.dispatch()
@@ -160,81 +169,112 @@ func (o outbox[T]) process(id xid.ID) {
 	defer cancel()
 
 	if err := o.store.ProcessTx(ctx, o.processMessageTx(ctx, id)); err != nil {
-		o.logger.Log("err", fmt.Errorf("process transaction error: %v", err))
+		o.logger.Error(
+			"Failed to process message",
+			slog.Group(
+				"error",
+				slog.String("message", err.Error()),
+			),
+		)
 	}
 }
 
 func (o outbox[T]) processMessageTx(ctx context.Context, id xid.ID) func(s Store) bool {
 	return func(s Store) (success bool) {
-		var (
-			err    error
-			msg    T
-			record *Record
-		)
+		logger := o.logger.With(slog.String("recordId", id.String()))
 
-		defer func() {
-			logger := log.With(o.logger, "recordId", id)
+		fn := func() (err error) {
+			var (
+				msg    T
+				record *Record
+			)
 
-			if success {
-				logger.Log("msg", "successfully processed message")
-				return
+			defer func() {
+				if record == nil || err == nil || errors.Is(err, errSkippingRecord) {
+					return
+				}
+
+				if e := s.Update(ctx, record); e != nil {
+					err = errors.Join(err, fmt.Errorf("update record: %v", e))
+					return
+				}
+
+				if record.NumberOfAttempts < o.maxRetries {
+					return
+				}
+
+				logger.InfoContext(ctx, "Max retries hit, sending to DLQ")
+				if e := o.dlq.Send(ctx, msg, err); e != nil {
+					err = errors.Join(err, fmt.Errorf("send record to DLQ: %v", e))
+					return
+				}
+
+				if e := s.Delete(ctx, record.ID); e != nil {
+					err = errors.Join(fmt.Errorf("delete record after DLQ send: %v", e))
+				}
+			}()
+
+			record, err = s.GetWithLock(ctx, id)
+			if errors.Is(err, ErrRecordNotFound) {
+				return fmt.Errorf("record not found, %w", errSkippingRecord)
+			} else if err != nil {
+				return fmt.Errorf("get with lock: %v", err)
 			}
 
-			logger.Log("err", fmt.Errorf("unable to process record: %v", err))
-			if record == nil {
-				return
+			if record.LastAttemptAt != nil && time.Since(*record.LastAttemptAt) < 90*time.Second {
+				return fmt.Errorf("too soon since last attempt, %w", errSkippingRecord)
 			}
 
-			success = true
-
-			if err := s.Update(ctx, record); err != nil {
-				logger.Log("err", fmt.Errorf("unable to update record: %v", err))
-				return
+			msg, err = o.ed.Decode(record.Message)
+			if err != nil {
+				return fmt.Errorf("decode message: %v", err)
 			}
 
-			if record.NumberOfAttempts < o.maxRetries {
-				return
-			}
+			mbCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
 
-			logger.Log("msg", "max retries hit, sending to DLQ")
-			if err := o.dlq.Send(ctx, msg, err); err != nil {
-				logger.Log("err", fmt.Errorf("unable to send record to DLQ: %v", err))
-				return
+			if err = o.mb.Send(mbCtx, msg); err != nil {
+				attemptedAt := time.Now()
+				record.LastAttemptAt = &attemptedAt
+				record.NumberOfAttempts++
+				return fmt.Errorf("message bus send: %v", err)
 			}
 
 			if err := s.Delete(ctx, record.ID); err != nil {
-				logger.Log("err", fmt.Errorf("unable to delete record after DLQ send: %v", err))
+				return fmt.Errorf("delete record %q: %v", record.ID, err)
 			}
-		}()
 
-		record, err = s.GetWithLock(ctx, id)
-		if errors.Is(err, ErrRecordNotFound) {
+			return nil
+		}
+
+		err := fn()
+		if err == nil {
+			logger.InfoContext(
+				ctx,
+				"Successfully processed message",
+			)
 			return true
-		} else if err != nil {
-			return false
 		}
 
-		if record.LastAttemptAt != nil && time.Since(*record.LastAttemptAt) < 90*time.Second {
+		if errors.Is(err, errSkippingRecord) {
+			logger.InfoContext(
+				ctx,
+				"Skipping message",
+				slog.String("reason", err.Error()),
+			)
 			return true
 		}
 
-		msg, err = o.ed.Decode(record.Message)
-		if err != nil {
-			return false
-		}
+		logger.ErrorContext(
+			ctx,
+			"Failed to process outbox record",
+			slog.Group(
+				"error",
+				slog.String("message", err.Error()),
+			),
+		)
 
-		mbCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-
-		if err = o.mb.Send(mbCtx, msg); err != nil {
-			attemptedAt := time.Now()
-			record.LastAttemptAt = &attemptedAt
-			record.NumberOfAttempts++
-			return false
-		}
-
-		err = s.Delete(ctx, record.ID)
-		return err == nil
+		return false
 	}
 }
 
