@@ -198,7 +198,9 @@ func (s pgStore) Delete(ctx context.Context, id xid.ID) error {
 }
 
 func (s pgStore) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) error {
-	db, ok := s.db.(*sql.DB)
+	db, ok := s.db.(interface {
+		BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+	})
 	if !ok {
 		return errors.New("process transaction can only be called at the parent level")
 	}
