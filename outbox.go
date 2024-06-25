@@ -282,7 +282,7 @@ type gobEncodeDecoder[T any] struct{}
 
 func (g gobEncodeDecoder[T]) Encode(data T) ([]byte, error) {
 	var b bytes.Buffer
-	if err := gob.NewEncoder(&b).Encode(data); err != nil {
+	if err := gob.NewEncoder(&b).Encode(&data); err != nil {
 		return nil, err
 	}
 
