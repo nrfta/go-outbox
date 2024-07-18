@@ -1,4 +1,4 @@
-package mbNats
+package nats
 
 import (
 	"context"
