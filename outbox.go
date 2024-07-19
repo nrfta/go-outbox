@@ -12,7 +12,6 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/go-kit/log"
 	"github.com/rs/xid"
 )
 
@@ -96,14 +95,7 @@ func WithMaxRetries[T any](n int) option[T] {
 		o.maxRetries = n
 	}
 }
-
-func WithLogger[T any](logger log.Logger) option[T] {
-	return func(o *outbox[T]) {
-		o.logger = slog.Default()
-	}
-}
-
-func WithSlogLogger[T any](logger *slog.Logger) option[T] {
+func WithLogger[T any](logger *slog.Logger) option[T] {
 	return func(o *outbox[T]) {
 		if logger == nil {
 			logger = slog.Default()

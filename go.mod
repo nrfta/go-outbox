@@ -3,7 +3,6 @@ module github.com/nrfta/go-outbox
 go 1.21
 
 require (
-	github.com/go-kit/log v0.2.1
 	github.com/lib/pq v1.10.9
 	github.com/nats-io/nats.go v1.36.0
 	github.com/neighborly/go-pghelpers v0.9.0
@@ -16,7 +15,6 @@ require (
 
 require (
 	github.com/DATA-DOG/go-txdb v0.1.6 // indirect
-	github.com/go-logfmt/logfmt v0.6.0 // indirect
 	github.com/go-sql-driver/mysql v1.7.1 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/hpcloud/tail v1.0.0 // indirect

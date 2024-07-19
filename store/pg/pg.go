@@ -1,16 +1,14 @@
 package pg
 
-//go:generate go run go.uber.org/mock/mockgen --destination=mock_pg_test.go -package=pg -self_package=github.com/nrfta/go-outbox/store/pg . Logger
-
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
-	"github.com/go-kit/log"
 	"github.com/nrfta/go-outbox"
 
 	"github.com/lib/pq"
@@ -23,14 +21,12 @@ type execQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-type Logger log.Logger
-
 type pgStore struct {
 	db        execQuerier
 	tableName string
 	connStr   string
 	chanName  string
-	logger    Logger
+	logger    *slog.Logger
 }
 
 type option func(s *pgStore)
@@ -41,22 +37,41 @@ func WithTableName(tn string) option {
 	}
 }
 
-func WithLogger(l Logger) option {
+func WithLogger(logger *slog.Logger) option {
 	return func(s *pgStore) {
-		s.logger = l
+		if logger == nil {
+			logger = slog.Default()
+		}
+
+		s.logger = logger
 	}
 }
 
 var _ outbox.Store = &pgStore{}
 
-func NewStore(db execQuerier, connStr string, logger Logger, opts ...option) (*pgStore, error) {
-	s := &pgStore{db, "outbox", connStr, "", logger}
+func NewStore(db execQuerier, connStr string, opts ...option) (*pgStore, error) {
+	s := &pgStore{
+		db,
+		"outbox",
+		connStr,
+		"",
+		slog.Default(),
+	}
 
 	for _, o := range opts {
 		o(s)
 	}
 
-	s.chanName = strings.ReplaceAll(fmt.Sprintf("%s_channel", s.tableName), ".", "_")
+	s.logger = s.logger.With(
+		slog.String("component", "outbox/pgStore"),
+		slog.String("tableName", s.tableName),
+	)
+
+	s.chanName = strings.ReplaceAll(
+		fmt.Sprintf("%s_channel", s.tableName),
+		".",
+		"_",
+	)
 
 	if err := s.init(); err != nil {
 		return nil, err
@@ -80,7 +95,7 @@ func (s pgStore) CreateRecordTx(ctx context.Context, tx *sql.Tx, r outbox.Record
 
 func (s pgStore) Listen() <-chan xid.ID {
 	var (
-		logger   = log.With(s.logger, "component", "pgStore", "method", "Listen")
+		logger   = s.logger.With("method", "Listen")
 		listener = pq.NewListener(
 			s.connStr,
 			15*time.Second,
@@ -90,18 +105,28 @@ func (s pgStore) Listen() <-chan xid.ID {
 	)
 
 	if err := listener.Listen(s.chanName); err != nil {
-		logger.Log("err", fmt.Errorf("unable to listen to channel %s: %v", s.chanName, err))
+		logger.Error(
+			"unable to listen to channel",
+			"chanName",
+			s.chanName,
+			"error",
+			err,
+		)
 		return nil
 	}
 
-	logger.Log("msg", fmt.Sprintf("listening on channel %s", s.chanName))
+	logger.Info(
+		"listening on channel",
+		"chanName",
+		s.chanName,
+	)
 
 	idChan := make(chan xid.ID, 1)
 	go func(l *pq.Listener) {
 		for {
 			ids, err := s.getRecordIDs()
 			if err != nil {
-				s.logger.Log("err", err)
+				s.logger.Error("unable to get record ids", "error", err)
 				continue
 			}
 
