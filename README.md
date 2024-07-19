@@ -21,14 +21,12 @@ package main
 
 import (
     "database/sql"
-    "log"
     "log/slog"
     "os"
 
     "github.com/nats-io/nats.go"
     "github.com/nats-io/nats.go/jetstream"
 
-    goKitLog "github.com/go-kit/log"
     "github.com/nrfta/go-outbox"
     "github.com/nrfta/go-outbox/mb/nats"
     "github.com/nrfta/go-outbox/store/pg"
@@ -37,7 +35,7 @@ import (
 func NewNatsOutbox(db *sql.DB) (outbox.Outbox[*nats.Msg], error) {
     nc, err := nats.Connect(nats.DefaultURL)
     if err != nil {
-        log.Fatal(err)
+        return nil, err
     }
 
     // setup streams (create or update)
@@ -54,7 +52,6 @@ func NewNatsOutbox(db *sql.DB) (outbox.Outbox[*nats.Msg], error) {
     outboxStore, err := outboxPg.NewStore(
         db,
         "your_db_conn_string_here",
-        goKitLog.NewJSONLogger(goKitLog.NewSyncWriter(os.Stderr)),
         pg.WithTableName("outbox"),
     )
     if err != nil {
@@ -65,7 +62,7 @@ func NewNatsOutbox(db *sql.DB) (outbox.Outbox[*nats.Msg], error) {
         outboxStore,
         messageBroker,
         logDeadLetterQueue{},
-        outbox.WithSlogLogger[*nats.Msg](slog.Default()),
+        outbox.WithLogger[*nats.Msg](slog.Default()),
     )
 
     return outbox, nil
@@ -122,5 +119,4 @@ func main() {
         log.Fatal(err)
     }
 }
-
 ```
