@@ -1,20 +1,25 @@
-# Outbox
+# go-outbox
 
-This package implements the outbox pattern for message queues.
+go-outbox implements the [outbox pattern](https://microservices.io/patterns/data/transactional-outbox.html) for Go applications.  It stores messages in a database table as part of the same transaction as your business logic and dispatches them asynchronously to your message broker.
 
-`go-outbox`` is a Go library implementing the outbox pattern, designed to ensure reliable messaging between services using message brokers like Kafka, Nats, or any other supported message broker. This pattern helps achieve consistency between your database and the message broker by storing messages in a database outbox table before sending them to the broker in a transaction.
+## Features
+
+- Generic API that works with any message type
+- Built in PostgreSQL store with notification triggers
+- Message broker integrations for **Kafka** (franz-go) and **NATS** (including JetStream)
+- Pluggable dead letter queue interface
+- Configurable concurrency and retry behaviour
+- Uses `encoding/gob` for message serialization by default
 
 ## Installation
 
-To install the library, use the following command:
-
 ```sh
-go get -u github.com/nrfta/go-outbox
+go get github.com/nrfta/go-outbox
 ```
 
-## Setup
+## Quick start
 
-Below is an example of how to set up and use go-outbox with NATS as the message broker and PostgreSQL as the outbox store.
+The snippet below shows how to configure an outbox using PostgreSQL and NATS JetStream:
 
 ```go
 package main
@@ -22,101 +27,84 @@ package main
 import (
     "database/sql"
     "log/slog"
-    "os"
 
     "github.com/nats-io/nats.go"
     "github.com/nats-io/nats.go/jetstream"
 
     "github.com/nrfta/go-outbox"
-    "github.com/nrfta/go-outbox/mb/nats"
-    "github.com/nrfta/go-outbox/store/pg"
+    mbNats "github.com/nrfta/go-outbox/mb/nats"
+    outboxPg "github.com/nrfta/go-outbox/store/pg"
 )
 
-func NewNatsOutbox(db *sql.DB) (outbox.Outbox[*nats.Msg], error) {
+func NewNatsOutbox(db *sql.DB, connStr string) (outbox.Outbox[*nats.Msg], error) {
     nc, err := nats.Connect(nats.DefaultURL)
     if err != nil {
         return nil, err
     }
 
-    // setup streams (create or update)
     js, err := jetstream.New(nc)
     if err != nil {
         return nil, err
     }
 
-    messageBroker, err := mbNats.NewJetstream(js)
+    broker, err := mbNats.NewJetstream(js)
     if err != nil {
         return nil, err
     }
 
-    outboxStore, err := outboxPg.NewStore(
-        db,
-        "your_db_conn_string_here",
-        pg.WithTableName("outbox"),
-    )
+    store, err := outboxPg.NewStore(db, connStr)
     if err != nil {
         return nil, err
     }
 
-    outbox := outbox.New[*nats.Msg](
-        outboxStore,
-        messageBroker,
+    ob := outbox.New[*nats.Msg](
+        store,
+        broker,
         logDeadLetterQueue{},
         outbox.WithLogger[*nats.Msg](slog.Default()),
+        outbox.WithMaxRetries[*nats.Msg](10),
+        outbox.WithNumberOfRoutines[*nats.Msg](5),
     )
-
-    return outbox, nil
+    return ob, nil
 }
 ```
 
-## Usage
+## Sending messages
 
-Here is an example of how to use the outbox to send a message:
+Messages are queued by storing them in the outbox table inside the same
+database transaction as your business logic. The outbox library then
+dispatches them asynchronously in the background. Use `SendTx` to add a
+message to the queue:
 
 ```go
-package main
+ctx := context.Background()
+tx, _ := db.Begin()
 
-import (
-    "context"
-    "database/sql"
-    "log"
-
-    _ "github.com/lib/pq" // PostgreSQL driver
-    "github.com/nats-io/nats.go"
-    "github.com/nrfta/go-outbox"
-)
-
-func main() {
-    // Initialize your database connection (replace with your connection details)
-    db, err := sql.Open("postgres", "your_db_conn_string_here")
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Initialize the outbox
-    outbox, err := NewNatsOutbox(db)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Create a message
-    msg := &nats.Msg{
-        Subject: "hello",
-        Data:    []byte("hello"),
-    }
-
-    // Send the message within a transaction
-    tx, err := db.Begin()
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    if err := outbox.SendTx(context.Background(), tx, msg); err != nil {
-        log.Fatal(err)
-    }
-
-    if err := tx.Commit(); err != nil {
-        log.Fatal(err)
-    }
+msg := &nats.Msg{Subject: "hello", Data: []byte("world")}
+if err := ob.SendTx(ctx, tx, msg); err != nil {
+    tx.Rollback()
+    return err
 }
+return tx.Commit()
 ```
+
+## Options
+
+The `outbox.New` constructor accepts several optional configuration functions:
+
+- `WithNumberOfRoutines(n int)` – limits the number of goroutines used to dispatch messages
+- `WithMaxRetries(n int)` – maximum number of attempts before sending a message to the dead letter queue
+- `WithLogger(*slog.Logger)` – provide a custom logger
+
+You can provide your own store or message broker by implementing the `Store` and `MessageBroker` interfaces found in [outbox.go](outbox.go).
+
+## Running tests
+
+Integration tests require a running PostgreSQL instance.  You can run all tests with:
+
+```sh
+go test ./...
+```
+
+The CI workflow spins up Postgres automatically.
+
