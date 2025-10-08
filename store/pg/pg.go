@@ -21,7 +21,7 @@ type execQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-type pgStore struct {
+type Store struct {
 	db        execQuerier
 	tableName string
 	connStr   string
@@ -29,16 +29,16 @@ type pgStore struct {
 	logger    *slog.Logger
 }
 
-type option func(s *pgStore)
+type option func(s *Store)
 
 func WithTableName(tn string) option {
-	return func(s *pgStore) {
+	return func(s *Store) {
 		s.tableName = tn
 	}
 }
 
 func WithLogger(logger *slog.Logger) option {
-	return func(s *pgStore) {
+	return func(s *Store) {
 		if logger == nil {
 			logger = slog.Default()
 		}
@@ -47,10 +47,10 @@ func WithLogger(logger *slog.Logger) option {
 	}
 }
 
-var _ outbox.Store = &pgStore{}
+var _ outbox.Store = &Store{}
 
-func NewStore(db execQuerier, connStr string, opts ...option) (*pgStore, error) {
-	s := &pgStore{
+func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
+	s := &Store{
 		db,
 		"outbox",
 		connStr,
@@ -80,7 +80,7 @@ func NewStore(db execQuerier, connStr string, opts ...option) (*pgStore, error) 
 	return s, nil
 }
 
-func (s pgStore) CreateRecordTx(ctx context.Context, tx *sql.Tx, r outbox.Record) (*outbox.Record, error) {
+func (s Store) CreateRecordTx(ctx context.Context, tx *sql.Tx, r outbox.Record) (*outbox.Record, error) {
 	query := fmt.Sprintf(`
 	INSERT INTO %s VALUES ($1, $2);
 	`, s.tableName)
@@ -93,7 +93,7 @@ func (s pgStore) CreateRecordTx(ctx context.Context, tx *sql.Tx, r outbox.Record
 	return &r, nil
 }
 
-func (s pgStore) Listen() <-chan xid.ID {
+func (s Store) Listen() <-chan xid.ID {
 	var (
 		logger   = s.logger.With("method", "Listen")
 		listener = pq.NewListener(
@@ -148,7 +148,7 @@ func (s pgStore) Listen() <-chan xid.ID {
 	return idChan
 }
 
-func (s pgStore) getRecordIDs() ([]xid.ID, error) {
+func (s Store) getRecordIDs() ([]xid.ID, error) {
 	var res []xid.ID
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -180,7 +180,7 @@ func (s pgStore) getRecordIDs() ([]xid.ID, error) {
 	return res, nil
 }
 
-func (s pgStore) GetWithLock(ctx context.Context, id xid.ID) (*outbox.Record, error) {
+func (s Store) GetWithLock(ctx context.Context, id xid.ID) (*outbox.Record, error) {
 	if _, ok := s.db.(*sql.Tx); !ok {
 		return nil, errors.New("get method must be called inside a transaction")
 	}
@@ -209,7 +209,7 @@ func (s pgStore) GetWithLock(ctx context.Context, id xid.ID) (*outbox.Record, er
 	return &res, nil
 }
 
-func (s pgStore) Delete(ctx context.Context, id xid.ID) error {
+func (s Store) Delete(ctx context.Context, id xid.ID) error {
 	query := fmt.Sprintf(`
 	DELETE FROM %s WHERE id = $1;
 	`, s.tableName)
@@ -222,7 +222,7 @@ func (s pgStore) Delete(ctx context.Context, id xid.ID) error {
 	return nil
 }
 
-func (s pgStore) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) error {
+func (s Store) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) error {
 	db, ok := s.db.(interface {
 		BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
 	})
@@ -235,7 +235,7 @@ func (s pgStore) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) erro
 		return fmt.Errorf("unable to create transaction: %v", err)
 	}
 
-	store := pgStore{
+	store := Store{
 		db:        tx,
 		tableName: s.tableName,
 	}
@@ -247,7 +247,7 @@ func (s pgStore) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) erro
 	return tx.Commit()
 }
 
-func (s pgStore) Update(ctx context.Context, record *outbox.Record) error {
+func (s Store) Update(ctx context.Context, record *outbox.Record) error {
 	if record == nil {
 		return errors.New("record cannot be nil")
 	}
@@ -271,7 +271,7 @@ func (s pgStore) Update(ctx context.Context, record *outbox.Record) error {
 	return nil
 }
 
-func (s pgStore) init() error {
+func (s Store) init() error {
 	var (
 		fnName      = strings.ReplaceAll(fmt.Sprintf("notify_%s_channel", s.tableName), ".", "_")
 		triggerName = strings.ReplaceAll(fmt.Sprintf("%s_insert_notification", s.tableName), ".", "_")
