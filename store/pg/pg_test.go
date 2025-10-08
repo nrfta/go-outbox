@@ -26,7 +26,7 @@ var _ = Describe("pgStore", func() {
 
 	Describe("#CreateRecordTx", func() {
 		var (
-			subject *pgStore
+			subject *Store
 			ctx     context.Context
 			tx      *sql.Tx
 
@@ -60,7 +60,7 @@ var _ = Describe("pgStore", func() {
 
 	Describe("#GetWithLock", func() {
 		var (
-			subject *pgStore
+			subject *Store
 			ctx     context.Context
 			id      xid.ID
 		)
@@ -232,7 +232,7 @@ var _ = Describe("pgStore", func() {
 	})
 })
 
-func createStore(opts ...option) *pgStore {
+func createStore(opts ...option) *Store {
 	s, err := NewStore(db, connStr, opts...)
 	Expect(err).To(Succeed())
 	return s
