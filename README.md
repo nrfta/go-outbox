@@ -98,6 +98,49 @@ The `outbox.New` constructor accepts several optional configuration functions:
 
 You can provide your own store or message broker by implementing the `Store` and `MessageBroker` interfaces found in [outbox.go](outbox.go).
 
+## Testing
+
+The `testing` package provides synchronous implementations of outbox interfaces for deterministic, race-condition-free testing. Instead of processing messages asynchronously with background workers, these implementations deliver messages synchronously when they're created.
+
+### Benefits
+
+- **Deterministic execution** – No async race conditions or timing issues
+- **Immediate processing** – Events handled synchronously, no waiting required
+- **Full stack traces** – See the complete call chain in test failures
+- **No infrastructure** – Tests run without NATS or background workers
+- **Simpler debugging** – Step through event handling in debugger
+
+### Usage Example
+
+```go
+import (
+    "github.com/nats-io/nats.go/jetstream"
+    "github.com/nrfta/go-outbox"
+    "github.com/nrfta/go-outbox/testing"
+)
+
+// Setup synchronous testing infrastructure
+syncJS := testing.NewSyncJetStream()
+syncBroker := testing.NewSyncBroker(syncJS)
+syncStore := testing.NewSyncStore(syncBroker)
+
+// Create outbox with sync components
+ob, err := outbox.New(syncStore, syncBroker)
+if err != nil {
+    panic(err)
+}
+
+// Override JetStream in your DI container
+// Events will now be processed synchronously
+```
+
+The sync implementations work together:
+1. `SyncStore` decodes messages and sends them to the broker immediately (no DB storage)
+2. `SyncBroker` routes messages to `SyncJetStream`
+3. `SyncJetStream` delivers messages directly to registered consumers
+
+See [testing/doc.go](testing/doc.go) for detailed documentation.
+
 ## Running tests
 
 Integration tests require a running PostgreSQL instance.  You can run all tests with:
