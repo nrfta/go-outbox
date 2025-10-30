@@ -45,9 +45,22 @@
 // - No infrastructure: Tests run without NATS or background workers
 // - Simpler debugging: Step through event handling in debugger
 //
-// # Trade-offs
+// # Important Limitations
 //
-// This approach tests the business logic but not the async behavior of the real system.
-// For integration tests that verify async messaging behavior, use real NATS JetStream
-// with testcontainers or similar infrastructure.
+// Transaction Semantics: SyncStore sends messages immediately when CreateRecordTx is
+// called, BEFORE the transaction commits. This differs from the real outbox pattern:
+//
+//	Real Outbox: Store → Commit → NOTIFY → Worker → Send
+//	SyncStore:   Send → Store (no-op) → Commit (too late)
+//
+// This means messages are sent even if the transaction is later rolled back, violating
+// transactional guarantees. This is acceptable for most test scenarios where:
+//   - Tests use transaction-per-test isolation (go-txdb)
+//   - Focus is on business logic, not transaction edge cases
+//   - Rollback scenarios with events are not being tested
+//
+// Async Behavior: This approach tests business logic but not async behavior of the
+// real system. For integration tests that verify async messaging, transaction rollback
+// scenarios, or true transactional semantics, use real PostgreSQL outbox store with
+// NATS JetStream via testcontainers.
 package testing

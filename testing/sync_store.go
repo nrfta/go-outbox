@@ -15,6 +15,23 @@ import (
 // SyncStore is a store for testing that immediately sends messages
 // instead of storing them for async processing. This enables synchronous
 // event processing in tests without the need for background workers.
+//
+// IMPORTANT: Messages are sent immediately when CreateRecordTx is called,
+// BEFORE the transaction commits. This differs from the real outbox pattern
+// where messages are only sent after successful transaction commit.
+//
+// This means:
+//   - If a transaction is rolled back, messages are still sent
+//   - Transaction isolation guarantees do not apply to message delivery
+//   - Tests cannot verify rollback behavior with event publishing
+//
+// This limitation is acceptable for most testing scenarios where:
+//   - Tests use transaction-per-test isolation (go-txdb)
+//   - Focus is on business logic, not transaction edge cases
+//   - Rollback scenarios with events are not being tested
+//
+// For tests that need true transactional semantics with events,
+// use the real PostgreSQL outbox store with testcontainers.
 type SyncStore struct {
 	broker outbox.MessageBroker[*nats.Msg]
 }
