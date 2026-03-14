@@ -249,7 +249,7 @@ func (o outbox[T]) processMessageTx(ctx context.Context, id xid.ID) func(s Store
 		}
 
 		if errors.Is(err, errSkippingRecord) {
-			logger.InfoContext(
+			logger.DebugContext(
 				ctx,
 				"Skipping message",
 				slog.String("reason", err.Error()),
