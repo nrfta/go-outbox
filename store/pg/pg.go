@@ -22,11 +22,13 @@ type execQuerier interface {
 }
 
 type Store struct {
-	db        execQuerier
-	tableName string
-	connStr   string
-	chanName  string
-	logger    *slog.Logger
+	db             execQuerier
+	tableName      string
+	connStr        string
+	chanName       string
+	logger         *slog.Logger
+	pageSize       int
+	chanBufferSize int
 }
 
 type option func(s *Store)
@@ -47,15 +49,33 @@ func WithLogger(logger *slog.Logger) option {
 	}
 }
 
+func WithPageSize(n int) option {
+	return func(s *Store) {
+		if n > 0 {
+			s.pageSize = n
+		}
+	}
+}
+
+func WithChannelBufferSize(n int) option {
+	return func(s *Store) {
+		if n > 0 {
+			s.chanBufferSize = n
+		}
+	}
+}
+
 var _ outbox.Store = &Store{}
 
 func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
 	s := &Store{
-		db,
-		"outbox",
-		connStr,
-		"",
-		slog.Default(),
+		db:             db,
+		tableName:      "outbox",
+		connStr:        connStr,
+		chanName:       "",
+		logger:         slog.Default(),
+		pageSize:       20,
+		chanBufferSize: 100,
 	}
 
 	for _, o := range opts {
@@ -121,24 +141,29 @@ func (s Store) Listen() <-chan xid.ID {
 		s.chanName,
 	)
 
-	idChan := make(chan xid.ID, 1)
+	// Ping the listner every 90 seconds to ensure it stays connected and receives notifications in a timely manner.
+	pingTicker := time.NewTicker(90 * time.Second)
+	go func(l *pq.Listener) {
+		for range pingTicker.C {
+			if err := l.Ping(); err != nil {
+				logger.Error("error pinging listener", "error", err)
+			}
+		}
+	}(listener)
+
+	idChan := make(chan xid.ID, s.chanBufferSize)
 	go func(l *pq.Listener) {
 		for {
-			ids, err := s.getRecordIDs()
+			err := s.getRecordIDs(idChan)
 			if err != nil {
 				s.logger.Error("unable to get record ids", "error", err)
 				continue
-			}
-
-			for _, i := range ids {
-				idChan <- i
 			}
 
 			select {
 			case <-l.Notify:
 				// New record(s) available to process
 			case <-time.After(90 * time.Second):
-				go l.Ping()
 				// Check if there's more work available, just in case it takes a while
 				// for the Listener to notice connection loss and reconnect.
 			}
@@ -148,36 +173,60 @@ func (s Store) Listen() <-chan xid.ID {
 	return idChan
 }
 
-func (s Store) getRecordIDs() ([]xid.ID, error) {
-	var res []xid.ID
+func (s Store) getRecordIDs(idChan chan xid.ID) error {
+	var lastID string
+	for {
+		n, err := s.fetchPage(idChan, &lastID)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+	}
+}
+
+func (s Store) fetchPage(idChan chan xid.ID, lastID *string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	query := fmt.Sprintf(`
-	SELECT id FROM %s;
-	`, s.tableName)
+	var query string
+	var args []any
+	if *lastID == "" {
+		query = fmt.Sprintf(`SELECT id FROM %s ORDER BY id LIMIT %d;`, s.tableName, s.pageSize)
+	} else {
+		query = fmt.Sprintf(`SELECT id FROM %s WHERE id > $1 ORDER BY id LIMIT %d;`, s.tableName, s.pageSize)
+		args = []any{*lastID}
+	}
 
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer rows.Close()
 
+	numRows := 0
 	for rows.Next() {
 		var rawID string
 		if err := rows.Scan(&rawID); err != nil {
-			return nil, err
+			return 0, err
 		}
 
 		id, err := xid.FromString(rawID)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
 
-		res = append(res, id)
+		idChan <- id
+		*lastID = rawID
+		numRows++
 	}
 
-	return res, nil
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	return numRows, nil
 }
 
 func (s Store) GetWithLock(ctx context.Context, id xid.ID) (*outbox.Record, error) {
@@ -236,8 +285,11 @@ func (s Store) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) error 
 	}
 
 	store := Store{
-		db:        tx,
-		tableName: s.tableName,
+		db:             tx,
+		tableName:      s.tableName,
+		logger:         s.logger,
+		pageSize:       s.pageSize,
+		chanBufferSize: s.chanBufferSize,
 	}
 
 	if success := fn(store); !success {
