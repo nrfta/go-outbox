@@ -141,18 +141,9 @@ func (s Store) Listen() <-chan xid.ID {
 		s.chanName,
 	)
 
-	// Ping the listner every 90 seconds to ensure it stays connected and receives notifications in a timely manner.
-	pingTicker := time.NewTicker(90 * time.Second)
-	go func(l *pq.Listener) {
-		for range pingTicker.C {
-			if err := l.Ping(); err != nil {
-				logger.Error("error pinging listener", "error", err)
-			}
-		}
-	}(listener)
-
 	idChan := make(chan xid.ID, s.chanBufferSize)
 	go func(l *pq.Listener) {
+		defer l.Close()
 		for {
 			err := s.getRecordIDs(idChan)
 			if err != nil {
@@ -164,6 +155,7 @@ func (s Store) Listen() <-chan xid.ID {
 			case <-l.Notify:
 				// New record(s) available to process
 			case <-time.After(90 * time.Second):
+				l.Ping()
 				// Check if there's more work available, just in case it takes a while
 				// for the Listener to notice connection loss and reconnect.
 			}
