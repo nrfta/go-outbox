@@ -117,6 +117,7 @@ func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
 		return nil, fmt.Errorf("ping consumer db pool: %w", err)
 	}
 	s.consumerDB = consumerDB
+	s.db = consumerDB
 
 	if err := s.init(); err != nil {
 		consumerDB.Close()
@@ -186,12 +187,6 @@ func (s Store) Listen() <-chan xid.ID {
 	go func(l *pq.Listener) {
 		defer l.Close()
 		for {
-			select {
-			case <-s.done:
-				return
-			default:
-			}
-
 			err := s.getRecordIDs(idChan)
 			if err != nil {
 				s.logger.Error("unable to get record ids", "error", err)
