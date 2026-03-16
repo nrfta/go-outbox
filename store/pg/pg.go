@@ -22,11 +22,15 @@ type execQuerier interface {
 }
 
 type Store struct {
-	db        execQuerier
-	tableName string
-	connStr   string
-	chanName  string
-	logger    *slog.Logger
+	db               execQuerier
+	tableName        string
+	connStr          string
+	chanName         string
+	logger           *slog.Logger
+	pageSize         int
+	chanBufferSize   int
+	maxConsumerConns int
+	done             chan struct{}
 }
 
 type option func(s *Store)
@@ -47,15 +51,43 @@ func WithLogger(logger *slog.Logger) option {
 	}
 }
 
+func WithPageSize(n int) option {
+	return func(s *Store) {
+		if n > 0 {
+			s.pageSize = n
+		}
+	}
+}
+
+func WithChannelBufferSize(n int) option {
+	return func(s *Store) {
+		if n > 0 {
+			s.chanBufferSize = n
+		}
+	}
+}
+
+func WithMaxConsumerConns(n int) option {
+	return func(s *Store) {
+		if n > 0 {
+			s.maxConsumerConns = n
+		}
+	}
+}
+
 var _ outbox.Store = &Store{}
 
 func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
 	s := &Store{
-		db,
-		"outbox",
-		connStr,
-		"",
-		slog.Default(),
+		db:               db,
+		tableName:        "outbox",
+		connStr:          connStr,
+		chanName:         "",
+		logger:           slog.Default(),
+		pageSize:         6,
+		chanBufferSize:   5,
+		maxConsumerConns: 8,
+		done:             make(chan struct{}),
 	}
 
 	for _, o := range opts {
@@ -73,11 +105,45 @@ func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
 		"_",
 	)
 
+	// dedicated pool for consumer operations (queryPage, ProcessTx) so that Listen can keep polling
+	// for new work even if the caller is doing long-running work or has a slow connection
+	consumerDB, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("open consumer db pool: %w", err)
+	}
+	consumerDB.SetMaxOpenConns(s.maxConsumerConns)
+	consumerDB.SetMaxIdleConns(s.maxConsumerConns)
+	if err := consumerDB.Ping(); err != nil {
+		consumerDB.Close()
+		return nil, fmt.Errorf("ping consumer db pool: %w", err)
+	}
+	s.db = consumerDB
+
 	if err := s.init(); err != nil {
+		consumerDB.Close()
 		return nil, err
 	}
 
 	return s, nil
+}
+
+// Close signals the Listen goroutine to stop and shuts down the dedicated
+// consumer connection pool. It does not close the caller-owned db passed to NewStore.
+func (s *Store) Close() error {
+	select {
+	case <-s.done:
+		// already closed
+	default:
+		close(s.done)
+	}
+	if s.db != nil {
+		if db, ok := s.db.(interface {
+			Close() error
+		}); ok {
+			db.Close()
+		}
+	}
+	return nil
 }
 
 func (s Store) CreateRecordTx(ctx context.Context, tx *sql.Tx, r outbox.Record) (*outbox.Record, error) {
@@ -121,20 +187,18 @@ func (s Store) Listen() <-chan xid.ID {
 		s.chanName,
 	)
 
-	idChan := make(chan xid.ID, 1)
+	idChan := make(chan xid.ID, s.chanBufferSize)
 	go func(l *pq.Listener) {
+		defer l.Close()
 		for {
-			ids, err := s.getRecordIDs()
+			err := s.getRecordIDs(idChan)
 			if err != nil {
 				s.logger.Error("unable to get record ids", "error", err)
-				continue
-			}
-
-			for _, i := range ids {
-				idChan <- i
 			}
 
 			select {
+			case <-s.done:
+				return
 			case <-l.Notify:
 				// New record(s) available to process
 			case <-time.After(90 * time.Second):
@@ -148,21 +212,65 @@ func (s Store) Listen() <-chan xid.ID {
 	return idChan
 }
 
-func (s Store) getRecordIDs() ([]xid.ID, error) {
-	var res []xid.ID
+func (s Store) getRecordIDs(idChan chan xid.ID) error {
+	var lastID string
+	for {
+		n, err := s.fetchPage(idChan, &lastID)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+	}
+}
+
+func (s Store) fetchPage(idChan chan xid.ID, lastID *string) (int, error) {
+	ids, err := s.queryPage(*lastID)
+	if err != nil {
+		return 0, err
+	}
+
+	// Send to the channel outside of the DB context so that blocking on a
+	// full channel does not hold open rows or trigger a context timeout.
+	for _, id := range ids {
+		select {
+		case idChan <- id:
+		case <-s.done:
+			return 0, nil
+		}
+	}
+
+	if len(ids) > 0 {
+		*lastID = ids[len(ids)-1].String()
+	}
+
+	return len(ids), nil
+}
+
+// queryPage executes a single keyset-paginated query and returns up to
+// pageSize IDs. The context timeout only covers the DB round-trip; channel
+// backpressure cannot cause it to expire.
+func (s Store) queryPage(afterID string) ([]xid.ID, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	query := fmt.Sprintf(`
-	SELECT id FROM %s;
-	`, s.tableName)
+	var query string
+	var args []any
+	if afterID == "" {
+		query = fmt.Sprintf(`SELECT id FROM %s ORDER BY id LIMIT %d;`, s.tableName, s.pageSize)
+	} else {
+		query = fmt.Sprintf(`SELECT id FROM %s WHERE id > $1 ORDER BY id LIMIT %d;`, s.tableName, s.pageSize)
+		args = []any{afterID}
+	}
 
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	var ids []xid.ID
 	for rows.Next() {
 		var rawID string
 		if err := rows.Scan(&rawID); err != nil {
@@ -174,10 +282,14 @@ func (s Store) getRecordIDs() ([]xid.ID, error) {
 			return nil, err
 		}
 
-		res = append(res, id)
+		ids = append(ids, id)
 	}
 
-	return res, nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return ids, nil
 }
 
 func (s Store) GetWithLock(ctx context.Context, id xid.ID) (*outbox.Record, error) {
@@ -234,14 +346,18 @@ func (s Store) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) error 
 	if err != nil {
 		return fmt.Errorf("unable to create transaction: %v", err)
 	}
+	defer tx.Rollback() // no-op after Commit; silently handles context cancellation
 
 	store := Store{
-		db:        tx,
-		tableName: s.tableName,
+		db:             tx,
+		tableName:      s.tableName,
+		logger:         s.logger,
+		pageSize:       s.pageSize,
+		chanBufferSize: s.chanBufferSize,
 	}
 
 	if success := fn(store); !success {
-		return tx.Rollback()
+		return nil // rollback handled by defer; real error already logged in callback
 	}
 
 	return tx.Commit()
