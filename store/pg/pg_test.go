@@ -21,6 +21,38 @@ var _ = Describe("pgStore", func() {
 			subject, err := NewStore(db, connStr)
 			Expect(err).To(Succeed())
 			Expect(subject).ToNot(BeNil())
+			defer subject.Close()
+		})
+
+		It("should create a separate consumer pool", func() {
+			subject, err := NewStore(db, connStr)
+			Expect(err).To(Succeed())
+			defer subject.Close()
+
+			Expect(subject.consumerDB).ToNot(BeNil())
+			Expect(subject.consumerDB.Ping()).To(Succeed())
+		})
+
+		It("should respect WithMaxConsumerConns option", func() {
+			subject, err := NewStore(db, connStr, WithMaxConsumerConns(3))
+			Expect(err).To(Succeed())
+			defer subject.Close()
+
+			stats := subject.consumerDB.Stats()
+			Expect(stats.MaxOpenConnections).To(Equal(3))
+		})
+	})
+
+	Describe("#Close", func() {
+		It("should close the consumer pool without error", func() {
+			subject, err := NewStore(db, connStr)
+			Expect(err).To(Succeed())
+
+			err = subject.Close()
+			Expect(err).To(Succeed())
+
+			err = subject.consumerDB.Ping()
+			Expect(err).To(HaveOccurred())
 		})
 	})
 
@@ -37,6 +69,10 @@ var _ = Describe("pgStore", func() {
 			subject = createStore()
 			ctx = context.Background()
 			tx, _ = db.BeginTx(ctx, nil)
+		})
+
+		AfterEach(func() {
+			subject.Close()
 		})
 
 		It("should save the provided record on a successfull transaction", func() {
@@ -74,6 +110,10 @@ var _ = Describe("pgStore", func() {
 			Expect(err).To(Succeed())
 		})
 
+		AfterEach(func() {
+			subject.Close()
+		})
+
 		It("should return a record on a valid id", func() {
 			subject.ProcessTx(ctx, func(s outbox.Store) bool {
 				res, err := s.GetWithLock(ctx, id)
@@ -102,6 +142,7 @@ var _ = Describe("pgStore", func() {
 				subject = createStore()
 				ids     = []xid.ID{xid.New(), xid.New(), xid.New()}
 			)
+			defer subject.Close()
 
 			for _, id := range ids {
 				_ = insertRecord(db, outbox.Record{ID: id, Message: []byte("data")})
@@ -132,6 +173,7 @@ var _ = Describe("pgStore", func() {
 				ctx     = context.Background()
 				tx, _   = db.BeginTx(ctx, nil)
 			)
+			defer subject.Close()
 
 			res, err := subject.CreateRecordTx(ctx, tx, outbox.Record{})
 			tx.Commit()
@@ -147,6 +189,7 @@ var _ = Describe("pgStore", func() {
 				subject = createStore()
 				id      = xid.New()
 			)
+			defer subject.Close()
 
 			_ = insertRecord(db, outbox.Record{ID: id, Message: []byte("data")})
 
@@ -164,6 +207,7 @@ var _ = Describe("pgStore", func() {
 				subject = createStore()
 				id      = xid.New()
 			)
+			defer subject.Close()
 
 			_ = insertRecord(db, outbox.Record{ID: id, Message: []byte("data")})
 
@@ -220,6 +264,7 @@ var _ = Describe("pgStore", func() {
 			)
 
 			_ = insertRecord(db, record)
+			defer subject.Close()
 
 			err := subject.Update(context.Background(), &record)
 			Expect(err).To(Succeed())

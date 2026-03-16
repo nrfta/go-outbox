@@ -22,13 +22,16 @@ type execQuerier interface {
 }
 
 type Store struct {
-	db             execQuerier
-	tableName      string
-	connStr        string
-	chanName       string
-	logger         *slog.Logger
-	pageSize       int
-	chanBufferSize int
+	db               execQuerier
+	consumerDB       *sql.DB // dedicated pool for consumer operations (queryPage, ProcessTx)
+	tableName        string
+	connStr          string
+	chanName         string
+	logger           *slog.Logger
+	pageSize         int
+	chanBufferSize   int
+	maxConsumerConns int
+	done             chan struct{}
 }
 
 type option func(s *Store)
@@ -65,17 +68,27 @@ func WithChannelBufferSize(n int) option {
 	}
 }
 
+func WithMaxConsumerConns(n int) option {
+	return func(s *Store) {
+		if n > 0 {
+			s.maxConsumerConns = n
+		}
+	}
+}
+
 var _ outbox.Store = &Store{}
 
 func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
 	s := &Store{
-		db:             db,
-		tableName:      "outbox",
-		connStr:        connStr,
-		chanName:       "",
-		logger:         slog.Default(),
-		pageSize:       6,
-		chanBufferSize: 5,
+		db:               db,
+		tableName:        "outbox",
+		connStr:          connStr,
+		chanName:         "",
+		logger:           slog.Default(),
+		pageSize:         6,
+		chanBufferSize:   5,
+		maxConsumerConns: 8,
+		done:             make(chan struct{}),
 	}
 
 	for _, o := range opts {
@@ -93,11 +106,39 @@ func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
 		"_",
 	)
 
+	consumerDB, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("open consumer db pool: %w", err)
+	}
+	consumerDB.SetMaxOpenConns(s.maxConsumerConns)
+	consumerDB.SetMaxIdleConns(s.maxConsumerConns)
+	if err := consumerDB.Ping(); err != nil {
+		consumerDB.Close()
+		return nil, fmt.Errorf("ping consumer db pool: %w", err)
+	}
+	s.consumerDB = consumerDB
+
 	if err := s.init(); err != nil {
+		consumerDB.Close()
 		return nil, err
 	}
 
 	return s, nil
+}
+
+// Close signals the Listen goroutine to stop and shuts down the dedicated
+// consumer connection pool. It does not close the caller-owned db passed to NewStore.
+func (s *Store) Close() error {
+	select {
+	case <-s.done:
+		// already closed
+	default:
+		close(s.done)
+	}
+	if s.consumerDB != nil {
+		return s.consumerDB.Close()
+	}
+	return nil
 }
 
 func (s Store) CreateRecordTx(ctx context.Context, tx *sql.Tx, r outbox.Record) (*outbox.Record, error) {
@@ -145,13 +186,20 @@ func (s Store) Listen() <-chan xid.ID {
 	go func(l *pq.Listener) {
 		defer l.Close()
 		for {
+			select {
+			case <-s.done:
+				return
+			default:
+			}
+
 			err := s.getRecordIDs(idChan)
 			if err != nil {
 				s.logger.Error("unable to get record ids", "error", err)
-				continue
 			}
 
 			select {
+			case <-s.done:
+				return
 			case <-l.Notify:
 				// New record(s) available to process
 			case <-time.After(90 * time.Second):
@@ -187,7 +235,11 @@ func (s Store) fetchPage(idChan chan xid.ID, lastID *string) (int, error) {
 	// Send to the channel outside of the DB context so that blocking on a
 	// full channel does not hold open rows or trigger a context timeout.
 	for _, id := range ids {
-		idChan <- id
+		select {
+		case idChan <- id:
+		case <-s.done:
+			return 0, nil
+		}
 	}
 
 	if len(ids) > 0 {
@@ -213,7 +265,7 @@ func (s Store) queryPage(afterID string) ([]xid.ID, error) {
 		args = []any{afterID}
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.consumerDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -284,14 +336,11 @@ func (s Store) Delete(ctx context.Context, id xid.ID) error {
 }
 
 func (s Store) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) error {
-	db, ok := s.db.(interface {
-		BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
-	})
-	if !ok {
+	if s.consumerDB == nil {
 		return errors.New("process transaction can only be called at the parent level")
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := s.consumerDB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("unable to create transaction: %v", err)
 	}

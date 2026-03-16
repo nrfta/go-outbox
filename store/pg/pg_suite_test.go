@@ -13,7 +13,7 @@ import (
 
 var (
 	db      *sql.DB
-	connStr = getConfig().GenerateAddress()
+	connStr string
 )
 
 func TestIntegration(t *testing.T) {
@@ -28,6 +28,7 @@ var _ = BeforeEach(func() {
 	var err error
 	cfg := getConfig()
 	cfg.Database = "outbox_test"
+	connStr = cfg.GenerateAddress()
 	db, err = pghelpers.ConnectPostgres(*cfg)
 	Expect(err).To(Succeed())
 })
