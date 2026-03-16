@@ -155,7 +155,7 @@ func (s Store) Listen() <-chan xid.ID {
 			case <-l.Notify:
 				// New record(s) available to process
 			case <-time.After(90 * time.Second):
-				l.Ping()
+				go l.Ping()
 				// Check if there's more work available, just in case it takes a while
 				// for the Listener to notice connection loss and reconnect.
 			}
