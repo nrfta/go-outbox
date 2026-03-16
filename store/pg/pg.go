@@ -23,7 +23,6 @@ type execQuerier interface {
 
 type Store struct {
 	db               execQuerier
-	consumerDB       *sql.DB // dedicated pool for consumer operations (queryPage, ProcessTx)
 	tableName        string
 	connStr          string
 	chanName         string
@@ -106,6 +105,8 @@ func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
 		"_",
 	)
 
+	// dedicated pool for consumer operations (queryPage, ProcessTx) so that Listen can keep polling
+	// for new work even if the caller is doing long-running work or has a slow connection
 	consumerDB, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open consumer db pool: %w", err)
@@ -116,7 +117,6 @@ func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
 		consumerDB.Close()
 		return nil, fmt.Errorf("ping consumer db pool: %w", err)
 	}
-	s.consumerDB = consumerDB
 	s.db = consumerDB
 
 	if err := s.init(); err != nil {
@@ -136,8 +136,12 @@ func (s *Store) Close() error {
 	default:
 		close(s.done)
 	}
-	if s.consumerDB != nil {
-		return s.consumerDB.Close()
+	if s.db != nil {
+		if db, ok := s.db.(interface {
+			Close() error
+		}); ok {
+			db.Close()
+		}
 	}
 	return nil
 }
@@ -260,7 +264,7 @@ func (s Store) queryPage(afterID string) ([]xid.ID, error) {
 		args = []any{afterID}
 	}
 
-	rows, err := s.consumerDB.QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -331,11 +335,14 @@ func (s Store) Delete(ctx context.Context, id xid.ID) error {
 }
 
 func (s Store) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) error {
-	if s.consumerDB == nil {
+	db, ok := s.db.(interface {
+		BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+	})
+	if !ok {
 		return errors.New("process transaction can only be called at the parent level")
 	}
 
-	tx, err := s.consumerDB.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("unable to create transaction: %v", err)
 	}

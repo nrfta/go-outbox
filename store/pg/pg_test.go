@@ -29,8 +29,8 @@ var _ = Describe("pgStore", func() {
 			Expect(err).To(Succeed())
 			defer subject.Close()
 
-			Expect(subject.consumerDB).ToNot(BeNil())
-			Expect(subject.consumerDB.Ping()).To(Succeed())
+			Expect(subject.db).ToNot(BeNil())
+			Expect(subject.db.(interface{ Ping() error }).Ping()).To(Succeed())
 		})
 
 		It("should respect WithMaxConsumerConns option", func() {
@@ -38,7 +38,7 @@ var _ = Describe("pgStore", func() {
 			Expect(err).To(Succeed())
 			defer subject.Close()
 
-			stats := subject.consumerDB.Stats()
+			stats := subject.db.(interface{ Stats() sql.DBStats }).Stats()
 			Expect(stats.MaxOpenConnections).To(Equal(3))
 		})
 	})
@@ -51,7 +51,7 @@ var _ = Describe("pgStore", func() {
 			err = subject.Close()
 			Expect(err).To(Succeed())
 
-			err = subject.consumerDB.Ping()
+			err = subject.db.(interface{ Ping() error }).Ping()
 			Expect(err).To(HaveOccurred())
 		})
 	})
