@@ -303,6 +303,7 @@ func (s Store) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) error 
 	if err != nil {
 		return fmt.Errorf("unable to create transaction: %v", err)
 	}
+	defer tx.Rollback() // no-op after Commit; silently handles context cancellation
 
 	store := Store{
 		db:             tx,
@@ -313,7 +314,7 @@ func (s Store) ProcessTx(ctx context.Context, fn func(outbox.Store) bool) error 
 	}
 
 	if success := fn(store); !success {
-		return tx.Rollback()
+		return nil // rollback handled by defer; real error already logged in callback
 	}
 
 	return tx.Commit()

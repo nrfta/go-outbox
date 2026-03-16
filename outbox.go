@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/rs/xid"
@@ -147,11 +148,20 @@ func (o outbox[T]) SendTx(ctx context.Context, tx *sql.Tx, msg T) error {
 
 func (o outbox[T]) dispatch() {
 	tokens := make(chan struct{}, o.numRoutines)
+	var inFlight sync.Map
+
 	for id := range o.store.Listen() {
+		if _, loaded := inFlight.LoadOrStore(id, struct{}{}); loaded {
+			continue
+		}
+
 		tokens <- struct{}{}
 		go func(id xid.ID) {
+			defer func() {
+				inFlight.Delete(id)
+				<-tokens
+			}()
 			o.process(id)
-			<-tokens
 		}(id)
 	}
 }
