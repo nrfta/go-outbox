@@ -74,8 +74,8 @@ func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
 		connStr:        connStr,
 		chanName:       "",
 		logger:         slog.Default(),
-		pageSize:       20,
-		chanBufferSize: 100,
+		pageSize:       6,
+		chanBufferSize: 5,
 	}
 
 	for _, o := range opts {
@@ -187,46 +187,66 @@ func (s Store) getRecordIDs(idChan chan xid.ID) error {
 }
 
 func (s Store) fetchPage(idChan chan xid.ID, lastID *string) (int, error) {
+	ids, err := s.queryPage(*lastID)
+	if err != nil {
+		return 0, err
+	}
+
+	// Send to the channel outside of the DB context so that blocking on a
+	// full channel does not hold open rows or trigger a context timeout.
+	for _, id := range ids {
+		idChan <- id
+	}
+
+	if len(ids) > 0 {
+		*lastID = ids[len(ids)-1].String()
+	}
+
+	return len(ids), nil
+}
+
+// queryPage executes a single keyset-paginated query and returns up to
+// pageSize IDs. The context timeout only covers the DB round-trip; channel
+// backpressure cannot cause it to expire.
+func (s Store) queryPage(afterID string) ([]xid.ID, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	var query string
 	var args []any
-	if *lastID == "" {
+	if afterID == "" {
 		query = fmt.Sprintf(`SELECT id FROM %s ORDER BY id LIMIT %d;`, s.tableName, s.pageSize)
 	} else {
 		query = fmt.Sprintf(`SELECT id FROM %s WHERE id > $1 ORDER BY id LIMIT %d;`, s.tableName, s.pageSize)
-		args = []any{*lastID}
+		args = []any{afterID}
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer rows.Close()
 
-	numRows := 0
+	var ids []xid.ID
 	for rows.Next() {
 		var rawID string
 		if err := rows.Scan(&rawID); err != nil {
-			return 0, err
+			return nil, err
 		}
 
 		id, err := xid.FromString(rawID)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 
-		idChan <- id
-		*lastID = rawID
-		numRows++
+		ids = append(ids, id)
 	}
 
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return nil, err
 	}
 
-	return numRows, nil
+	return ids, nil
 }
 
 func (s Store) GetWithLock(ctx context.Context, id xid.ID) (*outbox.Record, error) {
