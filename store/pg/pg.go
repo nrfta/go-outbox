@@ -119,16 +119,9 @@ func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
 	}
 	s.db = consumerDB
 
-	exists, err := s.tableExists()
-	if err != nil {
+	if err := s.init(); err != nil {
 		consumerDB.Close()
-		return nil, fmt.Errorf("check if outbox table exists: %w", err)
-	}
-	if !exists {
-		if err := s.init(); err != nil {
-			consumerDB.Close()
-			return nil, err
-		}
+		return nil, err
 	}
 
 	return s, nil
@@ -397,10 +390,7 @@ func (s Store) Update(ctx context.Context, record *outbox.Record) error {
 // tableExists checks whether the outbox table already exists in the database.
 // If it does, we skip the DDL in init() to avoid ACCESS EXCLUSIVE locks that
 // block all other operations on the table.
-func (s Store) tableExists() (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
+func (s Store) tableExists(ctx context.Context) (bool, error) {
 	schema, table := parseTableName(s.tableName)
 
 	var exists bool
@@ -429,6 +419,14 @@ func parseTableName(tableName string) (schema, table string) {
 func (s Store) init() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	exists, err := s.tableExists(ctx)
+	if err != nil {
+		return fmt.Errorf("check if outbox table exists: %w", err)
+	}
+	if exists {
+		return nil
+	}
 
 	var (
 		fnName      = strings.ReplaceAll(fmt.Sprintf("notify_%s_channel", s.tableName), ".", "_")
@@ -471,7 +469,7 @@ func (s Store) init() error {
 		)
 	)
 
-	_, err := s.db.ExecContext(ctx, query)
+	_, err = s.db.ExecContext(ctx, query)
 	if err != nil {
 		return err
 	}
