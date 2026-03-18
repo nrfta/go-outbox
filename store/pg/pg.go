@@ -119,9 +119,16 @@ func NewStore(db execQuerier, connStr string, opts ...option) (*Store, error) {
 	}
 	s.db = consumerDB
 
-	if err := s.init(); err != nil {
+	exists, err := s.tableExists()
+	if err != nil {
 		consumerDB.Close()
-		return nil, err
+		return nil, fmt.Errorf("check if outbox table exists: %w", err)
+	}
+	if !exists {
+		if err := s.init(); err != nil {
+			consumerDB.Close()
+			return nil, err
+		}
 	}
 
 	return s, nil
@@ -387,7 +394,42 @@ func (s Store) Update(ctx context.Context, record *outbox.Record) error {
 	return nil
 }
 
+// tableExists checks whether the outbox table already exists in the database.
+// If it does, we skip the DDL in init() to avoid ACCESS EXCLUSIVE locks that
+// block all other operations on the table.
+func (s Store) tableExists() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	schema, table := parseTableName(s.tableName)
+
+	var exists bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = $1
+			  AND table_name = $2
+		)`,
+		schema, table,
+	).Scan(&exists)
+
+	return exists, err
+}
+
+// parseTableName splits a potentially schema-qualified table name into schema
+// and table components. If no schema is specified, "public" is used.
+func parseTableName(tableName string) (schema, table string) {
+	parts := strings.SplitN(tableName, ".", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return "public", parts[0]
+}
+
 func (s Store) init() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	var (
 		fnName      = strings.ReplaceAll(fmt.Sprintf("notify_%s_channel", s.tableName), ".", "_")
 		triggerName = strings.ReplaceAll(fmt.Sprintf("%s_insert_notification", s.tableName), ".", "_")
@@ -399,9 +441,9 @@ func (s Store) init() error {
 			num_of_attempts int DEFAULT 0,
 			last_attempted_at timestamp
 		);
-			
-		CREATE OR REPLACE FUNCTION %s() 
-			RETURNS TRIGGER 
+
+		CREATE OR REPLACE FUNCTION %s()
+			RETURNS TRIGGER
 			LANGUAGE PLPGSQL
 		AS $$
 		BEGIN
@@ -410,9 +452,9 @@ func (s Store) init() error {
 		END;
 		$$
 		;
-			
+
 		DROP TRIGGER IF EXISTS %s ON %s;
-			
+
 		CREATE TRIGGER %s AFTER INSERT
 			ON %s
 			FOR EACH ROW
@@ -429,7 +471,7 @@ func (s Store) init() error {
 		)
 	)
 
-	_, err := s.db.ExecContext(context.Background(), query)
+	_, err := s.db.ExecContext(ctx, query)
 	if err != nil {
 		return err
 	}
