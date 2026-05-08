@@ -99,6 +99,14 @@ func (s *SyncJetStream) DeleteConsumer(ctx context.Context, stream, consumer str
 	return fmt.Errorf("not implemented")
 }
 
+func (s *SyncJetStream) ResetConsumer(ctx context.Context, stream, consumer string) (*jetstream.ConsumerResetResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (s *SyncJetStream) ResetConsumerToSequence(ctx context.Context, stream, consumer string, seq uint64) (*jetstream.ConsumerResetResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
 func (s *SyncJetStream) AccountInfo(ctx context.Context) (*jetstream.AccountInfo, error) {
 	return nil, fmt.Errorf("not implemented")
 }
