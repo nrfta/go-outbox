@@ -5,7 +5,7 @@ go 1.27.2
 require (
 	github.com/lib/pq v1.12.3
 	github.com/nats-io/nats.go v1.54.0
-	github.com/neighborly/go-pghelpers v0.12.0
+	github.com/neighborly/go-pghelpers v0.12.1
 	github.com/onsi/ginkgo v1.16.5
 	github.com/onsi/gomega v1.44.0
 	github.com/rs/xid v1.6.0
